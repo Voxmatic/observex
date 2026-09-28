@@ -1,0 +1,484 @@
+version: "3.9"
+
+# ════════════════════════════════════════════════════════════════
+#  ObserveX — Full Stack Observability Platform
+#  Local Development  (docker compose up)
+#
+#  All 9 services + all storage backends in one command.
+#  First run downloads images and compiles Go binaries (~5min).
+#  Subsequent runs use the Docker layer cache — fast.
+# ════════════════════════════════════════════════════════════════
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+networks:
+  observex:
+    driver: bridge
+
+volumes:
+  loki_data:
+  tempo_data:
+  clickhouse_data:
+  neo4j_data:
+  redis_data:
+  postgres_data:
+  trivy_cache:
+
+# Internal service token (S1-06), mounted at /run/secrets/observex_internal_token
+# and read through OBSERVEX_INTERNAL_TOKEN_FILE. Create the file first (from
+# this directory):  mkdir -p secrets && openssl rand -hex 32 > secrets/internal-token
+# The file is git-ignored; never commit a real token. Minimum 32 bytes.
+secrets:
+  observex_internal_token:
+    file: ./secrets/internal-token
+
+services:
+
+  # ════════════════════════════════
+  #  STORAGE LAYER
+  # ════════════════════════════════
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: observex-loki
+    <<: *default-restart
+    command: -config.file=/etc/loki/local-config.yaml
+    ports: ["3100:3100"]
+    volumes:
+      - loki_data:/loki
+      - ./configs/loki.yaml:/etc/loki/local-config.yaml:ro
+    networks: [observex]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: observex-tempo
+    <<: *default-restart
+    command: -config.file=/etc/tempo.yaml
+    ports: ["3200:3200", "4317:4317"]
+    volumes:
+      - tempo_data:/tmp/tempo
+      - ./configs/tempo.yaml:/etc/tempo.yaml:ro
+    networks: [observex]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3200/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.99.0
+    container_name: observex-otel-collector
+    <<: *default-restart
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"
+      - "43180:4318"
+    volumes:
+      - ./configs/otelcol.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      loki:            {condition: service_healthy}
+      tempo:           {condition: service_healthy}
+    networks: [observex]
+    logging: *default-logging
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: observex-clickhouse
+    <<: *default-restart
+    ports: ["8123:8123", "9000:9000"]
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./configs/clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    networks: [observex]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  neo4j:
+    image: neo4j:5.18.0
+    container_name: observex-neo4j
+    <<: *default-restart
+    ports: ["7474:7474", "7687:7687"]
+    volumes: [neo4j_data:/data]
+    environment:
+      NEO4J_AUTH: neo4j/observex123
+      NEO4J_PLUGINS: '["apoc"]'
+    networks: [observex]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7474"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: observex-redis
+    <<: *default-restart
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+    command: redis-server --save 60 1 --loglevel warning
+    networks: [observex]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: observex-postgres
+    <<: *default-restart
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../internal/db/migrations:/docker-entrypoint-initdb.d:ro
+    environment:
+      POSTGRES_DB: observex
+      POSTGRES_USER: observex
+      POSTGRES_PASSWORD: observex
+    networks: [observex]
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observex -d observex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ════════════════════════════════
+  #  OBSERVEX SERVICES
+  # ════════════════════════════════
+
+  ingestor:
+    build:
+      context: ../../          # repo root (go.mod is here)
+      dockerfile: services/ingestor/Dockerfile
+    image: observex/ingestor:latest
+    container_name: observex-ingestor
+    <<: *default-restart
+    ports: ["4318:4318"]
+    environment:
+      PORT: "4318"
+      LOKI_URL: http://loki:3100
+      TEMPO_URL: http://tempo:3200
+      OTEL_COLLECTOR_URL: http://otel-collector:4318
+      CLICKHOUSE_URL: http://clickhouse:8123
+      PROCESSOR_URL: http://processor:8080
+      OBSERVEX_INGEST_TOKEN: ${OBSERVEX_INGEST_TOKEN:-local-dev-observex-ingest-token}
+      OBSERVEX_INGEST_TOKEN_FILE: /run/secrets/observex-token
+      REQUIRE_AGENT_AUTH: "true"
+    volumes:
+      - ./configs/observex-token:/run/secrets/observex-token:ro
+    depends_on:
+      loki:            {condition: service_healthy}
+      tempo:           {condition: service_healthy}
+      clickhouse:      {condition: service_healthy}
+    networks: [observex]
+    logging: *default-logging
+
+  processor:
+    build:
+      context: ../../
+      dockerfile: services/processor/Dockerfile
+    image: observex/processor:latest
+    container_name: observex-processor
+    <<: *default-restart
+    ports: ["8090:8080"]
+    environment:
+      HC_PORT: "8080"
+      AI_AGENT_URL: http://ai-agent:8080
+      CLICKHOUSE_URL: http://clickhouse:8123
+      QUERY_ENGINE_URL: http://query-engine:9090
+      API_GATEWAY_URL: http://api-gateway:3001
+      POSTGRES_DSN: postgres://observex:observex@postgres:5432/observex?sslmode=disable
+      OBSERVEX_INTERNAL_TOKEN_FILE: /run/secrets/observex_internal_token
+    secrets: [observex_internal_token]
+    depends_on:
+      ingestor: {condition: service_started}
+      clickhouse: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    networks: [observex]
+    logging: *default-logging
+
+  ai-agent:
+    build:
+      context: ../../
+      dockerfile: services/ai-agent/Dockerfile
+    image: observex/ai-agent:latest
+    container_name: observex-ai-agent
+    <<: *default-restart
+    ports: ["8091:8080"]
+    environment:
+      HC_PORT: "8080"
+      DRY_RUN: "true"
+      CLUSTER_NAME: local-dev
+      PROCESSOR_URL: http://processor:8080
+      DASHBOARD_URL: http://localhost:3000
+      SLACK_WEBHOOK_URL: ""
+      PAGERDUTY_ROUTING_KEY: ""
+      ALLOWED_NAMESPACES: "default,production,staging"
+    volumes:
+      - ~/.kube:/root/.kube:ro
+    depends_on: [processor]
+    networks: [observex]
+    logging: *default-logging
+
+  api-gateway:
+    build:
+      context: ../../
+      dockerfile: services/api-gateway/Dockerfile
+    image: observex/api-gateway:latest
+    container_name: observex-api-gateway
+    <<: *default-restart
+    ports: ["3001:3001"]
+    environment:
+      PORT: "3001"
+      PROCESSOR_URL: http://processor:8080
+      AI_AGENT_URL: http://ai-agent:8080
+      QUERY_ENGINE_URL: http://query-engine:9090
+      LOKI_URL: http://loki:3100
+      TEMPO_URL: http://tempo:3200
+      INGESTOR_URL: http://ingestor:4318
+      PROFILING_URL: http://processor:8080
+      DB_MONITOR_URL: http://db-monitor:8087
+      CLICKHOUSE_URL: http://clickhouse:8123
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: observex
+      POSTGRES_PASSWORD: observex
+      POSTGRES_DB: observex
+      CLUSTER_NAME: local-dev
+      JWT_SECRET: local-dev-secret-change-in-production
+      ADMIN_PASSWORD: admin123
+      OBSERVEX_INTERNAL_TOKEN_FILE: /run/secrets/observex_internal_token
+    secrets: [observex_internal_token]
+    depends_on:
+      processor: {condition: service_started}
+      ai-agent: {condition: service_started}
+      postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      db-monitor: {condition: service_started}
+    networks: [observex]
+    logging: *default-logging
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    image: observex/frontend:latest
+    container_name: observex-frontend
+    <<: *default-restart
+    ports: ["3000:3000"]
+    depends_on:
+      api-gateway: {condition: service_started}
+    networks: [observex]
+    logging: *default-logging
+
+  query-engine:
+    build:
+      context: ../../
+      dockerfile: services/query-engine/Dockerfile
+    image: observex/query-engine:latest
+    container_name: observex-query-engine
+    restart: unless-stopped
+    expose: ["9090"]
+    environment:
+      PORT: "9090"
+      LOKI_URL: http://loki:3100
+      TEMPO_URL: http://tempo:3200
+      CLICKHOUSE_URL: http://clickhouse:8123
+      LOG_LEVEL: info
+    depends_on: [clickhouse, loki, tempo]
+    networks: [observex]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  activegate:
+    build:
+      context: ../../
+      dockerfile: services/activegate/Dockerfile
+    image: observex/activegate:latest
+    container_name: observex-activegate
+    <<: *default-restart
+    ports:
+      - "9999:9999"   # agent-facing port (OneAgents, RUM, Synthetic)
+      - "9998:9998"   # management/health
+    environment:
+      GATE_MODE: environment           # environment | cluster
+      GATE_ID: gate-env-01
+      PORT: "9999"
+      CLUSTER_ENDPOINT: http://observex-lb:4318   # points to load balancer in front of ingestors
+      DNS_ENTRY_POINT: activegate:9999
+      BUFFER_SIZE_MB: "64"
+      COMPRESS: "true"
+      OBSERVEX_TOKEN: ${OBSERVEX_INGEST_TOKEN:-local-dev-observex-ingest-token}
+      OBSERVEX_ORG_ID: ${OBSERVEX_ORG_ID:-local-dev}
+      OBSERVEX_ENV: ${OBSERVEX_ENV:-development}
+    depends_on:
+      ingestor: {condition: service_started}
+    networks: [observex]
+    logging: *default-logging
+
+  # Second ActiveGate for HA (cluster mode, behind dnsEntryPoint LB)
+  activegate-2:
+    build:
+      context: ../../
+      dockerfile: services/activegate/Dockerfile
+    image: observex/activegate:latest
+    container_name: observex-activegate-2
+    <<: *default-restart
+    ports:
+      - "9996:9999"
+    environment:
+      GATE_MODE: cluster
+      GATE_ID: gate-cluster-02
+      PORT: "9999"
+      CLUSTER_ENDPOINT: http://observex-lb:4318
+      DNS_ENTRY_POINT: activegate-2:9999
+      BUFFER_SIZE_MB: "64"
+      COMPRESS: "true"
+      OBSERVEX_TOKEN: ${OBSERVEX_INGEST_TOKEN:-local-dev-observex-ingest-token}
+      OBSERVEX_ORG_ID: ${OBSERVEX_ORG_ID:-local-dev}
+      OBSERVEX_ENV: ${OBSERVEX_ENV:-development}
+    depends_on:
+      ingestor: {condition: service_started}
+    networks: [observex]
+    logging: *default-logging
+
+  # ── ObserveX Load Balancer (dnsEntryPoint for agents + seedServerUrl for cluster) ──
+  # Nginx-based: agent traffic → ActiveGates, cluster traffic → Ingestor nodes
+  observex-lb:
+    image: nginx:1.25-alpine
+    container_name: observex-lb
+    <<: *default-restart
+    ports:
+      - "4319:4318"   # cluster-facing LB (seedServerUrl reverse proxy)
+    volumes:
+      - ./nginx-lb.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      ingestor: {condition: service_started}
+    networks: [observex]
+    logging: *default-logging
+
+
+  # ── Grafana (optional: dashboards via ClickHouse + Loki + Tempo) ────────────
+
+  # ── Database Monitor ──────────────────────────────────────────────────────────
+  db-monitor:
+    image: observex/db-monitor:latest
+    build:
+      context: ../../
+      dockerfile: services/db-monitor/Dockerfile
+    container_name: observex-db-monitor
+    <<: *default-restart
+    ports: ["8087:8087"]
+    environment:
+      ADDR: ":8087"
+      POSTGRES_DSN: "postgres://observex:observex@postgres:5432/observex?sslmode=disable"
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [observex]
+    logging: *default-logging
+
+  # ════════════════════════════════════════════════════════════
+  # OPTIONAL PLUGIN: Grafana
+  # ObserveX has its own built-in dashboard builder.
+  # Enable Grafana only if you need it alongside ObserveX.
+  # To enable: uncomment the block below, then run:
+  #   docker compose up -d grafana
+  # ════════════════════════════════════════════════════════════
+  # grafana:
+  #   image: grafana/grafana:10.4.3
+  #   container_name: observex-grafana
+  #   restart: unless-stopped
+  #   ports: ["3002:3000"]
+  #   environment:
+  #     GF_SECURITY_ADMIN_USER: admin
+  #     GF_SECURITY_ADMIN_PASSWORD: admin
+  #     GF_USERS_DEFAULT_THEME: dark
+  #     GF_FEATURE_TOGGLES_ENABLE: traceToMetrics,correlations
+  #   volumes:
+  #     - grafana_data:/var/lib/grafana
+  #     - ./grafana/provisioning:/etc/grafana/provisioning:ro
+  #   depends_on:
+  #     clickhouse: {condition: service_healthy}
+  #   networks: [observex]
+
+  trivy-scanner:
+    build:
+      context: ../../
+      dockerfile: services/trivy-scanner/Dockerfile
+    image: observex/trivy-scanner:latest
+    container_name: observex-trivy-scanner
+    <<: *default-restart
+    ports: ["8085:8080"]
+    environment:
+      INGESTOR_URL: http://ingestor:4318
+      OBSERVEX_TOKEN: ${OBSERVEX_INGEST_TOKEN:-local-dev-observex-ingest-token}
+      OBSERVEX_ORG_ID: ${OBSERVEX_ORG_ID:-local-dev}
+      CLUSTER_NAME: local-dev
+      OBSERVEX_ENV: ${OBSERVEX_ENV:-development}
+      SCAN_INTERVAL_HOURS: "6"
+      TRIVY_SEVERITY: MEDIUM
+      TRIVY_CACHE_DIR: /trivy-cache
+    volumes:
+      - trivy_cache:/trivy-cache
+    depends_on:
+      activegate: {condition: service_started}
+    networks: [observex]
+    logging: *default-logging
+
+  oneagent:
+    build:
+      context: ../../
+      dockerfile: services/oneagent/Dockerfile
+    image: observex/oneagent:latest
+    container_name: observex-oneagent
+    <<: *default-restart
+    privileged: true
+    pid: "host"
+    environment:
+      NODE_NAME: docker-host
+      CLUSTER_NAME: local-dev
+      # OneAgents connect to ActiveGate on port 9999, NOT directly to ingestor
+      INGESTOR_URL: http://activegate:9999
+      OBSERVEX_TOKEN: ${OBSERVEX_INGEST_TOKEN:-local-dev-observex-ingest-token}
+      OBSERVEX_ORG_ID: ${OBSERVEX_ORG_ID:-local-dev}
+      OBSERVEX_ENV: ${OBSERVEX_ENV:-development}
+      OBSERVEX_COLLECTION_MODE: native
+      ENABLE_NATIVE_METRICS: "true"
+      ENABLE_EBPF: "false"      # disable eBPF in dev; enable on Linux with BTF kernel
+      ENABLE_K8S: "false"       # disable K8s in plain docker-compose
+      ENABLE_PROC: "true"
+    volumes:
+      - /proc:/proc:ro
+      - /sys:/sys:ro
+    depends_on:
+      ingestor: {condition: service_started}
+    networks: [observex]
+    logging: *default-logging

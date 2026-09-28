@@ -1,0 +1,27 @@
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+
+.env
+.env.local
+*.log
+
+# Internal service token files for Docker Compose (S1-06) — never commit
+/secrets/
+/deployments/docker/secrets/
+
+# Local build outputs
+/activegate
+/ai-agent
+/api-gateway
+/ingestor
+/processor
+/trivy-scanner
+/services/query-engine/query-engine
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

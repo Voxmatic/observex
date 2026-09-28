@@ -1,0 +1,699 @@
+{{/*
+deployments.yaml
+Kubernetes Deployment resources for all ObserveX application services:
+  ingestor, processor, ai-agent, api-gateway,
+  query-engine, profiling, synthetic, topology.
+
+OneAgent is a DaemonSet and lives in daemonset.yaml.
+*/}}
+
+{{/* ═══════════════════════════════════════════════════════════════════════════
+     MACRO: standard Deployment + Service
+     Context: root (.) with .component, .values, .port, .extraVolumes etc.
+     ════════════════════════════════════════════════════════════════════════ */}}
+
+{{- define "observex.deployment" -}}
+{{- $root     := .root -}}
+{{- $comp     := .component -}}
+{{- $vals     := .serviceValues -}}
+{{- $port     := .port -}}
+{{- $name     := printf "%s-%s" (include "observex.fullname" $root) $comp -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $comp }}
+  annotations:
+    observex.io/component: {{ $comp }}
+spec:
+  {{- if not $vals.autoscaling.enabled }}
+  replicas: {{ $vals.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $comp }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $comp }}
+        {{- with $vals.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/secrets: {{ include (print $root.Template.BasePath "/secrets.yaml") $root | sha256sum }}
+        {{- with $vals.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "observex.imagePullSecrets" $root | nindent 6 }}
+      serviceAccountName: {{ include "observex.serviceAccountName" $root }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: {{ $comp }}
+          image: {{ include "observex.image" (dict "Values" $root.Values "image" $vals.image "Chart" $root.Chart) }}
+          imagePullPolicy: {{ $vals.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $port }}
+              protocol: TCP
+          env:
+            {{- toYaml .env | nindent 12 }}
+            {{- with $vals.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .livenessDelay | default 15 }}
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .readinessDelay | default 5 }}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml $vals.resources | nindent 12 }}
+          {{- with .volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $vals.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $vals.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $vals.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $vals.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $comp }}
+  {{- with $vals.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $vals.service.type }}
+  ports:
+    - port: {{ $vals.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "observex.selectorLabels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $comp }}
+{{- end }}
+
+{{/* ════════════════════════════════════════════════════════════════════════
+     INGESTOR
+     ════════════════════════════════════════════════════════════════════ */}}
+{{- if .Values.ingestor.enabled }}
+{{ include "observex.deployment" (dict
+  "root"          .
+  "component"     "ingestor"
+  "serviceValues" .Values.ingestor
+  "port"          4318
+  "livenessDelay" 10
+  "readinessDelay" 5
+  "env" (list
+    (dict "name" "PORT"                  "value" "4318")
+    (dict "name" "LOKI_URL"              "value" (include "observex.lokiUrl" .))
+    (dict "name" "TEMPO_URL"             "value" (include "observex.tempoUrl" .))
+    (dict "name" "CLICKHOUSE_URL"        "value" (printf "http://%s:8123" (include "observex.clickhouseHost" .)))
+    (dict "name" "PROCESSOR_URL"         "value" (include "observex.processorUrl" .))
+    (dict "name" "LOG_LEVEL"             "value" .Values.global.logLevel)
+  )
+) }}
+{{- end }}
+
+{{/* ════════════════════════════════════════════════════════════════════════
+     PROCESSOR
+     ════════════════════════════════════════════════════════════════════ */}}
+{{- if .Values.processor.enabled }}
+{{- $procEnv := list
+    (dict "name" "HC_PORT"       "value" "8080")
+    (dict "name" "AI_AGENT_URL"  "value" (include "observex.aiAgentUrl" .))
+    (dict "name" "LOG_LEVEL"     "value" .Values.global.logLevel)
+    (dict "name" "OBSERVEX_INTERNAL_TOKEN_FILE" "value" "/var/run/secrets/observex/internal-token")
+}}
+{{- $procMounts := list
+    (dict "name" "internal-token" "mountPath" "/var/run/secrets/observex" "readOnly" true)
+}}
+{{- $procVolumes := list
+    (dict "name" "internal-token" "secret" (dict "secretName" (include "observex.secretName" .) "items" (list (dict "key" "internal-token" "path" "internal-token"))))
+}}
+{{- /* F6.1 (G-1): the dedicated probe listener; see templates/f61.yaml. */}}
+{{- if .Values.f61.enabled }}
+{{- include "observex.f61.validate" . }}
+{{- $f := .Values.f61 }}
+{{- $procEnv = concat $procEnv (include "observex.f61.dsnEnv" . | fromYamlArray) }}
+{{- $procEnv = append $procEnv (dict "name" "OBSERVEX_SYNTHETIC_PROBE_KEY_FILE" "value" (include "observex.f61.probeKeyPath" .)) }}
+{{- $procEnv = append $procEnv (dict "name" "OBSERVEX_F61_HORIZON" "value" (toString $f.horizon)) }}
+{{- $procEnv = append $procEnv (dict "name" "OBSERVEX_F61_INTAKE_ADDR" "value" (printf ":%v" $f.intake.port)) }}
+{{- $procMounts = append $procMounts (dict "name" "f61-probe-key" "mountPath" "/var/run/secrets/observex-f61/probe-key" "readOnly" true) }}
+{{- $procVolumes = append $procVolumes (dict "name" "f61-probe-key" "secret" (dict "secretName" $f.probeKeySecret.name "items" (list (dict "key" $f.probeKeySecret.key "path" "key")))) }}
+{{- if $f.intake.tlsSecret }}
+{{- $procEnv = append $procEnv (dict "name" "OBSERVEX_F61_INTAKE_TLS_CERT_FILE" "value" "/var/run/secrets/observex-f61/intake-tls/tls.crt") }}
+{{- $procEnv = append $procEnv (dict "name" "OBSERVEX_F61_INTAKE_TLS_KEY_FILE" "value" "/var/run/secrets/observex-f61/intake-tls/tls.key") }}
+{{- $procMounts = append $procMounts (dict "name" "f61-intake-tls" "mountPath" "/var/run/secrets/observex-f61/intake-tls" "readOnly" true) }}
+{{- $procVolumes = append $procVolumes (dict "name" "f61-intake-tls" "secret" (dict "secretName" $f.intake.tlsSecret)) }}
+{{- else }}
+{{- $procEnv = append $procEnv (dict "name" "OBSERVEX_F61_INTAKE_INSECURE_PLAINTEXT" "value" "true") }}
+{{- end }}
+{{- end }}
+{{ include "observex.deployment" (dict
+  "root"          .
+  "component"     "processor"
+  "serviceValues" .Values.processor
+  "port"          8080
+  "livenessDelay" 20
+  "readinessDelay" 10
+  "env"           $procEnv
+  "volumeMounts"  $procMounts
+  "volumes"       $procVolumes
+) }}
+{{- end }}
+
+{{/* ════════════════════════════════════════════════════════════════════════
+     AI AGENT
+     ════════════════════════════════════════════════════════════════════ */}}
+{{- if .Values.aiAgent.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "observex.fullname" . }}-ai-agent
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent
+spec:
+  {{- if not .Values.aiAgent.autoscaling.enabled }}
+  replicas: {{ .Values.aiAgent.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ai-agent
+  strategy:
+    type: Recreate   # AI agent should only have one active replica to prevent duplicate remediations
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ai-agent
+      annotations:
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- with .Values.aiAgent.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "observex.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "observex.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: ai-agent
+          image: {{ include "observex.image" (dict "Values" .Values "image" .Values.aiAgent.image "Chart" .Chart) }}
+          imagePullPolicy: {{ .Values.aiAgent.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: HC_PORT
+              value: "8080"
+            - name: DRY_RUN
+              value: {{ .Values.aiAgent.dryRun | toString | quote }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.global.clusterName | quote }}
+            - name: ALLOWED_NAMESPACES
+              value: {{ .Values.aiAgent.allowedNamespaces | quote }}
+            - name: PROCESSOR_URL
+              value: {{ include "observex.processorUrl" . }}
+            - name: DASHBOARD_URL
+              value: {{ printf "https://%s" .Values.global.domain | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.global.logLevel | quote }}
+            {{- if .Values.aiAgent.emailFrom }}
+            - name: EMAIL_FROM
+              value: {{ .Values.aiAgent.emailFrom | quote }}
+            - name: EMAIL_TO
+              value: {{ .Values.aiAgent.emailTo | quote }}
+            - name: EMAIL_SMTP_HOST
+              value: {{ .Values.aiAgent.smtpHost | quote }}
+            - name: EMAIL_SMTP_PORT
+              value: {{ .Values.aiAgent.smtpPort | quote }}
+            {{- end }}
+            - name: SLACK_WEBHOOK_URL
+              {{- include "observex.secretRef" (dict "secretName" (include "observex.secretName" .) "key" "slack-webhook-url") | nindent 14 }}
+            - name: PAGERDUTY_ROUTING_KEY
+              {{- include "observex.secretRef" (dict "secretName" (include "observex.secretName" .) "key" "pagerduty-routing-key") | nindent 14 }}
+            {{- with .Values.aiAgent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.aiAgent.resources | nindent 12 }}
+      {{- with .Values.aiAgent.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.aiAgent.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "observex.fullname" . }}-ai-agent
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent
+spec:
+  type: {{ .Values.aiAgent.service.type }}
+  ports:
+    - port: {{ .Values.aiAgent.service.port }}
+      targetPort: http
+      name: http
+  selector:
+    {{- include "observex.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent
+{{- end }}
+
+{{/* ════════════════════════════════════════════════════════════════════════
+     API GATEWAY
+     ════════════════════════════════════════════════════════════════════ */}}
+{{- if .Values.apiGateway.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "observex.fullname" . }}-api-gateway
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+spec:
+  {{- if not .Values.apiGateway.autoscaling.enabled }}
+  replicas: {{ .Values.apiGateway.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api-gateway
+      annotations:
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- with .Values.apiGateway.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "observex.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "observex.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api-gateway
+          image: {{ include "observex.image" (dict "Values" .Values "image" .Values.apiGateway.image "Chart" .Chart) }}
+          imagePullPolicy: {{ .Values.apiGateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3001
+          env:
+            - name: PORT
+              value: "3001"
+            - name: JWT_EXPIRY
+              value: {{ .Values.apiGateway.jwtExpiry | quote }}
+            - name: PROCESSOR_URL
+              value: {{ include "observex.processorUrl" . }}
+            - name: AI_AGENT_URL
+              value: {{ include "observex.aiAgentUrl" . }}
+            - name: QUERY_ENGINE_URL
+              value: {{ include "observex.queryEngineUrl" . }}
+            - name: LOKI_URL
+              value: {{ include "observex.lokiUrl" . }}
+            - name: TEMPO_URL
+              value: {{ include "observex.tempoUrl" . }}
+            - name: INGESTOR_URL
+              value: {{ include "observex.ingestorUrl" . }}
+            - name: PROFILING_URL
+              value: {{ include "observex.profilingUrl" . }}
+            - name: POSTGRES_HOST
+              value: {{ include "observex.postgresHost" . | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | default "observex" | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | default "observex" | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.global.logLevel | quote }}
+            - name: JWT_SECRET
+              {{- include "observex.secretRef" (dict "secretName" (include "observex.secretName" .) "key" "jwt-secret") | nindent 14 }}
+            - name: ADMIN_PASSWORD
+              {{- include "observex.secretRef" (dict "secretName" (include "observex.secretName" .) "key" "admin-password") | nindent 14 }}
+            - name: POSTGRES_PASSWORD
+              {{- include "observex.secretRef" (dict "secretName" (include "observex.secretName" .) "key" "postgres-password") | nindent 14 }}
+            # S1-06: internal service token, read from the mounted secret file.
+            - name: OBSERVEX_INTERNAL_TOKEN_FILE
+              value: /var/run/secrets/observex/internal-token
+            {{- if .Values.f61.enabled }}
+            # F6.1: probe credential signing key (issuance and revocation).
+            - name: OBSERVEX_SYNTHETIC_PROBE_KEY_FILE
+              value: {{ include "observex.f61.probeKeyPath" . }}
+            {{- end }}
+            {{- with .Values.apiGateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.apiGateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: internal-token
+              mountPath: /var/run/secrets/observex
+              readOnly: true
+            {{- if .Values.f61.enabled }}
+            - name: f61-probe-key
+              mountPath: /var/run/secrets/observex-f61/probe-key
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: internal-token
+          secret:
+            secretName: {{ include "observex.secretName" . }}
+            items:
+              - key: internal-token
+                path: internal-token
+        {{- if .Values.f61.enabled }}
+        - name: f61-probe-key
+          secret:
+            secretName: {{ .Values.f61.probeKeySecret.name }}
+            items:
+              - key: {{ .Values.f61.probeKeySecret.key }}
+                path: key
+        {{- end }}
+      {{- with .Values.apiGateway.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.apiGateway.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.apiGateway.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "observex.fullname" . }}-api-gateway
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+  {{- with .Values.apiGateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.apiGateway.service.type }}
+  ports:
+    - port: {{ .Values.apiGateway.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "observex.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+{{- end }}
+
+{{/* ════════════════════════════════════════════════════════════════════════
+     REMAINING SERVICES — query-engine, profiling, synthetic, topology
+     These share a common structure: one Deployment + one Service.
+     ════════════════════════════════════════════════════════════════════ */}}
+
+{{- $remainingServices := list
+  (dict
+    "key"  "queryEngine"
+    "comp" "query-engine"
+    "vals" .Values.queryEngine
+    "port" 9090
+    "liveness" 15
+    "env" (list
+      (dict "name" "PORT"                  "value" "9090")
+      (dict "name" "CLICKHOUSE_URL"        "value" (printf "http://%s:8123" (include "observex.clickhouseHost" .)))
+      (dict "name" "LOKI_URL"              "value" (include "observex.lokiUrl" .))
+      (dict "name" "TEMPO_URL"             "value" (include "observex.tempoUrl" .))
+      (dict "name" "REDIS_ADDR"            "value" (printf "%s:6379" (include "observex.redisHost" .)))
+      (dict "name" "LOG_LEVEL"             "value" .Values.global.logLevel)
+    )
+  )
+  (dict
+    "key"  "profiling"
+    "comp" "profiling"
+    "vals" .Values.profiling
+    "port" 4040
+    "liveness" 15
+    "env" (list
+      (dict "name" "PORT"              "value" "4040")
+      (dict "name" "CLICKHOUSE_HOST"   "value" (include "observex.clickhouseHost" .))
+      (dict "name" "LOG_LEVEL"         "value" .Values.global.logLevel)
+    )
+  )
+  (dict
+    "key"  "synthetic"
+    "comp" "synthetic"
+    "vals" .Values.synthetic
+    "port" 7070
+    "liveness" 15
+    "env" (list
+      (dict "name" "PORT"              "value" "7070")
+      (dict "name" "CLICKHOUSE_HOST"   "value" (include "observex.clickhouseHost" .))
+      (dict "name" "SEED_DEMO"         "value" (.Values.synthetic.seedDemo | toString))
+      (dict "name" "LOG_LEVEL"         "value" .Values.global.logLevel)
+    )
+  )
+  (dict
+    "key"  "topology"
+    "comp" "topology"
+    "vals" .Values.topology
+    "port" 8082
+    "liveness" 20
+    "env" (list
+      (dict "name" "PORT"          "value" "8082")
+      (dict "name" "NEO4J_URI"     "value" (include "observex.neo4jUrl" .))
+      (dict "name" "NEO4J_USER"    "value" "neo4j")
+      (dict "name" "REDIS_ADDR"    "value" (printf "%s:6379" (include "observex.redisHost" .)))
+      (dict "name" "LOG_LEVEL"     "value" .Values.global.logLevel)
+    )
+  )
+-}}
+
+{{- range $svc := $remainingServices }}
+{{- if $svc.vals.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "observex.fullname" $ }}-{{ $svc.comp }}
+  namespace: {{ $.Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc.comp }}
+spec:
+  replicas: {{ $svc.vals.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $svc.comp }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $svc.comp }}
+      annotations:
+        {{- with $svc.vals.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "observex.imagePullSecrets" $ | nindent 6 }}
+      serviceAccountName: {{ include "observex.serviceAccountName" $ }}
+      containers:
+        - name: {{ $svc.comp }}
+          image: {{ include "observex.image" (dict "Values" $.Values "image" $svc.vals.image "Chart" $.Chart) }}
+          imagePullPolicy: {{ $svc.vals.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $svc.port }}
+          env:
+            {{- range $e := $svc.env }}
+            - name: {{ $e.name }}
+              value: {{ $e.value | quote }}
+            {{- end }}
+            {{- if eq $svc.comp "topology" }}
+            - name: NEO4J_PASSWORD
+              {{- include "observex.secretRef" (dict "secretName" (include "observex.secretName" $) "key" "neo4j-password") | nindent 14 }}
+            {{- end }}
+            {{- with $svc.vals.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: {{ $svc.liveness }}
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml $svc.vals.resources | nindent 12 }}
+      {{- with $svc.vals.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $svc.vals.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "observex.fullname" $ }}-{{ $svc.comp }}
+  namespace: {{ $.Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc.comp }}
+spec:
+  type: {{ $svc.vals.service.type }}
+  ports:
+    - port: {{ $svc.vals.service.port }}
+      targetPort: http
+      name: http
+  selector:
+    {{- include "observex.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc.comp }}
+{{- end }}
+{{- end }}
+
+---
+# ── DB Monitor ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "observex.fullname" . }}-db-monitor
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: db-monitor
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: db-monitor
+    spec:
+      serviceAccountName: {{ include "observex.serviceAccountName" . }}
+      containers:
+        - name: db-monitor
+          image: "{{ .Values.global.imageRegistry }}/db-monitor:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8087
+              name: http
+          env:
+            - name: ADDR
+              value: ":8087"
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observex.fullname" . }}-secrets
+                  key: postgres-dsn
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+          livenessProbe:
+            httpGet: { path: /health, port: 8087 }
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: 8087 }
+            initialDelaySeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "observex.fullname" . }}-db-monitor
+  labels: {{- include "observex.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 8087
+      targetPort: http
+      name: http
+  selector:
+    {{- include "observex.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: db-monitor

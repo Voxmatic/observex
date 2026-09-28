@@ -1,0 +1,213 @@
+████████████████████████████████████████████████████████████████
+  ObserveX v{{ .Chart.AppVersion }} — Deployment Complete
+████████████████████████████████████████████████████████████████
+
+{{- $fullName := include "observex.fullname" . }}
+{{- $ns := .Release.Namespace }}
+
+✅  Release:   {{ .Release.Name }}
+✅  Namespace: {{ $ns }}
+✅  Chart:     {{ .Chart.Name }}-{{ .Chart.Version }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SERVICES DEPLOYED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- if .Values.ingestor.enabled }}
+  ✓ Ingestor          (OTEL receiver)      :4318
+{{- end }}
+{{- if .Values.processor.enabled }}
+  ✓ Processor         (anomaly + SLO)      :8080
+{{- end }}
+{{- if .Values.aiAgent.enabled }}
+  ✓ AI Agent          (autonomous K8s)     :8080  {{ if .Values.aiAgent.dryRun }}[DRY-RUN]{{ end }}
+{{- end }}
+{{- if .Values.apiGateway.enabled }}
+  ✓ API Gateway       (REST + WebSocket)   :3001
+{{- end }}
+{{- if .Values.oneagent.enabled }}
+  ✓ OneAgent          (DaemonSet / eBPF)   all nodes
+{{- end }}
+{{- if .Values.queryEngine.enabled }}
+  ✓ Query Engine      (PromQL/LogQL/TraceQL) :9090
+{{- end }}
+{{- if .Values.profiling.enabled }}
+  ✓ Profiling         (Pyroscope-compat)   :4040
+{{- end }}
+{{- if .Values.synthetic.enabled }}
+  ✓ Synthetic Monitor (8 check types)      :7070
+{{- end }}
+{{- if .Values.topology.enabled }}
+  ✓ Topology          (Neo4j Cypher)       :8082
+{{- end }}
+{{- if .Values.trivyScanner.enabled }}
+  ✓ Trivy Scanner     (CVE image scanning) :8080
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  STORAGE BACKENDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ ClickHouse       (native metrics)      :8123
+{{- if .Values.loki.enabled }}
+  ✓ Loki             (logs)                :3100
+{{- else }}
+  → Loki             external: {{ .Values.loki.externalUrl }}
+{{- end }}
+{{- if .Values.tempo.enabled }}
+  ✓ Tempo            (traces)              :3200
+{{- else }}
+  → Tempo            external: {{ .Values.tempo.externalUrl }}
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+  ✓ PostgreSQL       (user/session data)   :5432
+{{- else }}
+  → PostgreSQL       external: {{ .Values.postgresql.externalHost }}
+{{- end }}
+{{- if .Values.redis.enabled }}
+  ✓ Redis            (cache / rate-limit)  :6379
+{{- else }}
+  → Redis            external: {{ .Values.redis.externalHost }}
+{{- end }}
+{{- if .Values.clickhouse.enabled }}
+  ✓ ClickHouse       (events / profiling)  :8123
+{{- else }}
+  → ClickHouse       external: {{ .Values.clickhouse.externalHost }}
+{{- end }}
+{{- if .Values.neo4j.enabled }}
+  ✓ Neo4j            (topology graph)      :7687
+{{- else }}
+  → Neo4j            external: {{ .Values.neo4j.externalUrl }}
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ACCESS THE API GATEWAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- if .Values.ingress.enabled }}
+
+  The API Gateway is exposed at:
+  {{- if .Values.ingress.tls.enabled }}
+    https://{{ .Values.global.domain }}/api
+  {{- else }}
+    http://{{ .Values.global.domain }}/api
+  {{- end }}
+
+  Login with admin@observex.io and the password you set in
+  secrets.adminPassword (or the existingSecret).
+
+{{- else }}
+
+  Ingress is disabled. To access the API Gateway locally:
+
+  export POD_NAME=$(kubectl get pods -n {{ $ns }} \
+    -l "app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=api-gateway" \
+    -o jsonpath="{.items[0].metadata.name}")
+  kubectl port-forward -n {{ $ns }} $POD_NAME 3001:3001
+
+  Then open: http://localhost:3001/health
+
+  To enable Ingress, upgrade with:
+    helm upgrade {{ .Release.Name }} ./observex \
+      --set ingress.enabled=true \
+      --set global.domain=observex.example.com \
+      --set ingress.tls.enabled=true \
+      --set ingress.annotations."cert-manager\.io/cluster-issuer"=letsencrypt-prod
+
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  VERIFY THE DEPLOYMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # Check all pods are Running
+  kubectl get pods -n {{ $ns }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+  # Check OneAgent is running on all nodes
+  kubectl get daemonset -n {{ $ns }} {{ $fullName }}-oneagent
+
+  # Watch rollout status
+  kubectl rollout status deployment/{{ $fullName }}-api-gateway -n {{ $ns }}
+  kubectl rollout status deployment/{{ $fullName }}-ingestor     -n {{ $ns }}
+
+  # View ingestor logs
+  kubectl logs -n {{ $ns }} \
+    -l "app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=ingestor" \
+    --tail=50 -f
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SEND YOUR FIRST TRACE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Configure your application's OTEL exporter to:
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://{{ $fullName }}-ingestor.{{ $ns }}:4318
+
+  Or use the ObserveX Go SDK (zero-config):
+    sdk.Start(sdk.Config{
+      ServiceName: "my-service",
+      ServerURL:   "http://{{ $fullName }}-ingestor.{{ $ns }}:4318",
+    })
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  AI AGENT STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- if .Values.aiAgent.dryRun }}
+  ⚠️  AI Agent is in DRY-RUN mode. It will detect problems and
+     suggest remediations, but will NOT execute any K8s actions.
+
+  To enable autonomous remediation:
+    helm upgrade {{ .Release.Name }} ./observex --set aiAgent.dryRun=false
+{{- else }}
+  ✅  AI Agent is in LIVE mode. It will autonomously:
+     • Restart failing pods
+     • Roll back bad deployments
+     • Scale services under load
+     • Cordon degraded nodes
+
+  To switch to dry-run mode:
+    helm upgrade {{ .Release.Name }} ./observex --set aiAgent.dryRun=true
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  USEFUL COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SECURITY & OBSERVABILITY ADD-ONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RUM Browser SDK
+    Add to your web app to capture Web Vitals, JS errors, and sessions:
+    <script src="/observex-rum.min.js"></script>
+    <script>ObserveX.init({ appId: "my-app", ingestor: "https://{{ .Values.global.domain }}" })</script>
+    View data: https://{{ .Values.global.domain }}/rum
+
+  Release regression detection
+    Record deployments from your CI/CD pipeline:
+    curl -X POST https://{{ .Values.global.domain }}/api/v1/deployments \
+         -H "Authorization: Bearer $TOKEN" \
+         -d '{"service_name":"api","version":"v1.2.3"}'
+    Results appear in: https://{{ .Values.global.domain }}/releases
+
+  Container vulnerability scanning
+    Trivy scanner runs automatically and pushes CVE findings to:
+    https://{{ .Values.global.domain }}/security
+
+  Runtime threat detection
+    eBPF security monitor is embedded in the OneAgent DaemonSet.
+    Monitor: https://{{ .Values.global.domain }}/security
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # Upgrade to a new version
+  helm upgrade {{ .Release.Name }} ./observex \
+    --set ingestor.image.tag=v1.1.0 \
+    --set apiGateway.image.tag=v1.1.0
+
+  # Scale the ingestor for higher throughput
+  helm upgrade {{ .Release.Name }} ./observex \
+    --set ingestor.autoscaling.maxReplicas=20
+
+  # Disable eBPF (fallback to /proc reader)
+  helm upgrade {{ .Release.Name }} ./observex \
+    --set oneagent.enableEBPF=false
+
+  # Uninstall (keeps PVCs by default — add --set persistence.keep=false to delete)
+  helm uninstall {{ .Release.Name }} -n {{ $ns }}
+
+  Documentation: https://github.com/your-org/observex/tree/main/docs

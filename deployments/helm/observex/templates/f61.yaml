@@ -1,0 +1,420 @@
+{{/*
+f61.yaml — F6.1 TLS certificate expiry detection (G-1: a dedicated synthetic
+probe service, one Deployment per vantage). Rendered only when f61.enabled.
+
+  - Service <fullname>-processor-probe-intake: the processor's dedicated probe
+    listener (work + intake routes only; TLS unless explicitly disabled).
+  - One Deployment <fullname>-probe-<vantage> per f61.vantages entry, each
+    with its own credential Secret. Probes run `synthetic-probe serve`.
+  - NetworkPolicies (when networkPolicy.enabled): probes may reach DNS, the
+    listener and public targets only; the listener accepts probes (and any
+    configured peers); the processor may reach PostgreSQL.
+  - Optional Ingress for probes outside the cluster.
+  - Optional migration Job (interim; the migration mechanism is D-03).
+
+The processor and api-gateway environment for F6.1 is in deployments.yaml.
+Every design choice here is PROPOSED (Increment-3 decision record).
+*/}}
+{{- if .Values.f61.enabled }}
+{{- include "observex.f61.validate" . }}
+{{- $f := .Values.f61 }}
+{{- $fullname := include "observex.fullname" . }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "observex.f61.intakeServiceName" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: processor
+    observex.io/f61: probe-intake
+  annotations:
+    # The DNS name probes verify: the listener certificate must carry it as a SAN.
+    observex.io/tls-server-name: {{ include "observex.f61.intakeTLSName" . | quote }}
+    {{- with $f.intake.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ $f.intake.service.type }}
+  ports:
+    - name: probe-intake
+      port: {{ $f.intake.port }}
+      targetPort: {{ $f.intake.port }}
+      protocol: TCP
+  selector:
+    {{- include "observex.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: processor
+
+{{- range $v := $f.vantages }}
+{{- $allowPrivate := $f.probe.allowPrivateTargets }}
+{{- if hasKey $v "allowPrivateTargets" }}{{- $allowPrivate = $v.allowPrivateTargets }}{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-probe-%s" $fullname $v.name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: synthetic-probe
+    observex.io/vantage: {{ $v.name }}
+spec:
+  replicas: 1
+  # One probe per vantage: never two at once during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: synthetic-probe
+      observex.io/vantage: {{ $v.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: synthetic-probe
+        observex.io/vantage: {{ $v.name }}
+        {{- if $allowPrivate }}
+        observex.io/private-targets: "true"
+        {{- end }}
+    spec:
+      {{- include "observex.imagePullSecrets" $ | nindent 6 }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: synthetic-probe
+          image: {{ include "observex.image" (dict "Values" $.Values "image" $f.probe.image "Chart" $.Chart) }}
+          imagePullPolicy: {{ $f.probe.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          env:
+            - name: OBSERVEX_PROCESSOR_URL
+              value: {{ include "observex.f61.processorUrl" $ | quote }}
+            - name: OBSERVEX_SYNTHETIC_PROBE_CREDENTIAL_FILE
+              value: /var/run/secrets/observex-probe/credential/credential
+            {{- if $f.probe.processorCASecret.name }}
+            - name: OBSERVEX_PROCESSOR_CA_FILE
+              value: /var/run/secrets/observex-probe/processor-ca/ca.crt
+            {{- end }}
+            - name: OBSERVEX_PROBE_MAX_IN_FLIGHT
+              value: {{ $f.probe.maxInFlight | toString | quote }}
+            - name: OBSERVEX_PROBE_HEALTH_ADDR
+              value: ":8081"
+            {{- if $allowPrivate }}
+            - name: OBSERVEX_PROBE_ALLOW_PRIVATE_TARGETS
+              value: "true"
+            {{- end }}
+            {{- if and $f.intake.insecurePlaintext (not $f.probe.processorUrl) }}
+            - name: OBSERVEX_PROBE_ALLOW_PLAINTEXT
+              value: "true"
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $f.probe.resources | nindent 12 }}
+          volumeMounts:
+            - name: credential
+              mountPath: /var/run/secrets/observex-probe/credential
+              readOnly: true
+            {{- if $f.probe.processorCASecret.name }}
+            - name: processor-ca
+              mountPath: /var/run/secrets/observex-probe/processor-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        # Mounted as a projected directory (not subPath), so a rotated Secret
+        # reaches the running probe; it re-reads the file after a rejection.
+        - name: credential
+          secret:
+            secretName: {{ $v.credentialSecret }}
+            items:
+              - key: {{ $v.credentialKey | default "credential" }}
+                path: credential
+        {{- if $f.probe.processorCASecret.name }}
+        - name: processor-ca
+          secret:
+            secretName: {{ $f.probe.processorCASecret.name }}
+            items:
+              - key: {{ $f.probe.processorCASecret.key }}
+                path: ca.crt
+        {{- end }}
+      {{- with $v.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+
+{{- if .Values.networkPolicy.enabled }}
+# ── Probes: DNS, the processor listener, and public targets only ────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-f61-probe
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: synthetic-probe
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: synthetic-probe
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress: probes serve nothing but their kubelet health endpoint.
+  ingress: []
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: processor
+      ports:
+        - port: {{ $f.intake.port }}
+          protocol: TCP
+    # Public probe targets. Private, loopback, link-local and CGNAT ranges
+    # are excluded here; the probe's own SSRF guard enforces the same
+    # independently of the network plugin.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8", "0.0.0.0/8"]
+        - ipBlock:
+            cidr: ::/0
+            except: ["fc00::/7", "fe80::/10", "::1/128"]
+      ports:
+        {{- range $f.probe.targetPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+# ── Probes allowed private targets (f61.probe / vantage allowPrivateTargets) ─
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-f61-probe-private-targets
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: synthetic-probe
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: synthetic-probe
+      observex.io/private-targets: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        - ipBlock:
+            cidr: ::/0
+      ports:
+        {{- range $f.probe.targetPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+# ── Processor: the probe listener and PostgreSQL ────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-f61-processor
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: processor
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: processor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: synthetic-probe
+        {{- with $f.intake.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: {{ $f.intake.port }}
+          protocol: TCP
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+{{- if $f.migrations.job.enabled }}
+# ── Migration Job: PostgreSQL only ──────────────────────────────────────────
+# The chart's default-deny policy selects this pod too and already allows DNS
+# (port 53); this adds the one other destination the Job needs. PostgreSQL's
+# own ingress is covered by the storage-access policy (all chart pods).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-f61-db-migrate
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: db-migrate
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+{{- end }}
+{{- end }}
+
+{{- if $f.ingress.enabled }}
+{{- if not $f.ingress.host }}
+{{- fail "f61.ingress.host is required when f61.ingress.enabled is true" }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-f61-probe-intake
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: processor
+  {{- with $f.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if $f.ingress.className }}
+  ingressClassName: {{ $f.ingress.className | quote }}
+  {{- end }}
+  {{- if $f.ingress.tlsSecret }}
+  tls:
+    - hosts:
+        - {{ $f.ingress.host | quote }}
+      secretName: {{ $f.ingress.tlsSecret | quote }}
+  {{- end }}
+  rules:
+    - host: {{ $f.ingress.host | quote }}
+      http:
+        paths:
+          # Only the two probe routes; nothing else of the processor.
+          - path: /v1/synthetic/probe/work
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "observex.f61.intakeServiceName" . }}
+                port:
+                  name: probe-intake
+          - path: /v1/synthetic/checks/
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "observex.f61.intakeServiceName" . }}
+                port:
+                  name: probe-intake
+{{- end }}
+
+{{- if $f.migrations.job.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-db-migrate
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: db-migrate
+    spec:
+      {{- include "observex.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: db-migrate
+          image: {{ include "observex.image" (dict "Values" .Values "image" $f.migrations.image "Chart" .Chart) }}
+          imagePullPolicy: {{ $f.migrations.image.pullPolicy }}
+          env:
+            {{- include "observex.f61.dsnEnv" . | nindent 12 }}
+            - name: POSTGRES_DSN
+              value: "$(OBSERVEX_F61_POSTGRES_DSN)"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}
+{{- end }}

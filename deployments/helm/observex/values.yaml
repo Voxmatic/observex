@@ -1,0 +1,888 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  ObserveX Helm Values
+#  Override with: helm install observex ./observex -f my-values.yaml
+#
+#  Quick start (minimal override):
+#    helm install observex ./observex \
+#      --set global.domain=observex.example.com \
+#      --set secrets.jwtSecret=$(openssl rand -base64 32) \
+#      --set secrets.adminPassword=your-password
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── Global ────────────────────────────────────────────────────────────────────
+global:
+  # Image registry prefix. Leave empty to pull from Docker Hub.
+  # Set to your private registry: ghcr.io/your-org
+  imageRegistry: ""
+  imagePullSecrets: []
+
+  # The domain used for the Ingress host and email links
+  domain: "observex.example.com"
+
+  # Cluster name shown in the topology map and AI agent alerts
+  clusterName: "production"
+
+  # Default storage class for all PVCs. Leave empty to use the cluster default.
+  storageClass: ""
+
+  # Log level for all services (debug, info, warn, error)
+  logLevel: "info"
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# Secrets can be provided inline here (dev) or referenced from an existing
+# Kubernetes Secret (production). Using an existing secret is strongly recommended.
+#
+# To create secrets manually:
+#   kubectl create secret generic observex-secrets \
+#     --from-literal=jwt-secret=$(openssl rand -base64 32) \
+#     --from-literal=admin-password=your-password \
+#     --from-literal=postgres-password=your-pg-password \
+#     --from-literal=neo4j-password=your-neo4j-password \
+#     --from-literal=internal-token=$(openssl rand -hex 32)
+
+secrets:
+  # Set existingSecret to use a pre-existing K8s Secret instead of inline values.
+  # The secret must contain the keys: jwt-secret, admin-password, postgres-password, neo4j-password,
+  # internal-token
+  existingSecret: ""
+
+  # Inline values (used when existingSecret is empty)
+  jwtSecret: "change-this-jwt-secret-must-be-at-least-32-characters"
+  adminPassword: "change-this-admin-password"
+  postgresPassword: "change-this-postgres-password"
+  neo4jPassword: "change-this-neo4j-password"
+
+  # Internal service token (S1-06). Mounted as a file into api-gateway and
+  # processor and read through OBSERVEX_INTERNAL_TOKEN_FILE. Minimum 32 bytes
+  # after trimming whitespace (bytes, not characters). Leave empty to reuse the
+  # value already stored in the cluster Secret, or to generate one on first
+  # install. With `helm template`/GitOps (no cluster lookup) set this value or
+  # use existingSecret; otherwise a new token is generated on every render.
+  # Generate one with: openssl rand -hex 32
+  # Never commit a real token to version control.
+  internalToken: ""
+
+  # Optional: external alerting credentials
+  slackWebhookUrl: ""
+  pagerdutyRoutingKey: ""
+  smtpPassword: ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  OBSERVEX APPLICATION SERVICES
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Ingestor ──────────────────────────────────────────────────────────────────
+ingestor:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: observex/ingestor
+    tag: ""               # defaults to Chart.appVersion
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 4318
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # Extra environment variables (added on top of auto-generated ones)
+  extraEnv: []
+  # - name: MY_VAR
+  #   value: "my-value"
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+# ── Processor ─────────────────────────────────────────────────────────────────
+processor:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: observex/processor
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  # Processor maintains in-memory anomaly windows.
+  # Only scale to >1 if you add external state (Redis for windows).
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── AI Agent ──────────────────────────────────────────────────────────────────
+aiAgent:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: observex/ai-agent
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # Safety switch — when true, the agent plans but never executes K8s actions
+  dryRun: false
+
+  # Namespaces the agent is permitted to act on
+  allowedNamespaces: "default,production,staging"
+
+  # Alerting channels (credentials come from secrets)
+  emailFrom: ""
+  emailTo: ""
+  smtpHost: ""
+  smtpPort: "587"
+
+  rbac:
+    # Create ClusterRole + ClusterRoleBinding for K8s API access
+    create: true
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── API Gateway ───────────────────────────────────────────────────────────────
+apiGateway:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: observex/api-gateway
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 3001
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # JWT expiry duration (Go duration string)
+  jwtExpiry: "24h"
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── OneAgent (DaemonSet) ──────────────────────────────────────────────────────
+oneagent:
+  enabled: true
+
+  image:
+    repository: observex/oneagent
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # eBPF requires privileged mode
+  securityContext:
+    privileged: true
+    runAsUser: 0
+    runAsGroup: 0
+
+  hostPID: true
+  hostNetwork: true
+  hostIPC: false
+
+  # Host path mounts needed for eBPF + /proc reading
+  mounts:
+    proc: true        # /proc
+    sys: true         # /sys
+    cgroup: true      # /sys/fs/cgroup
+    debugfs: true     # /sys/kernel/debug (for kprobes)
+    modules: true     # /lib/modules (for kernel headers)
+    state: true       # agent ID, offsets, runtime state, staged signed updates
+
+  statePath: /var/lib/observex
+  tokenSecret:
+    # A Kubernetes Secret containing the tenant-scoped ObserveX Agent token.
+    # Example: kubectl create secret generic observex-agent-token --from-literal=token=...
+    name: ""
+    key: token
+
+  # Feature flags
+  enableEBPF: "true"
+  enableK8s: "true"
+  enableProc: "true"
+  scrapeIntervalSeconds: "15"
+  collectionMode: "native"
+  enableNativeMetrics: "true"
+
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  rbac:
+    create: true
+
+  # DaemonSet tolerates all nodes by default
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+
+  podAnnotations: {}
+  nodeSelector: {}
+  affinity: {}
+
+# ── Query Engine ──────────────────────────────────────────────────────────────
+queryEngine:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: observex/query-engine
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 9090
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── Profiling Service ─────────────────────────────────────────────────────────
+profiling:
+  enabled: false
+  replicaCount: 1
+
+  image:
+    repository: observex/profiling
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 4040
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── Synthetic Monitoring ──────────────────────────────────────────────────────
+synthetic:
+  enabled: false
+  replicaCount: 1
+
+  image:
+    repository: observex/synthetic
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 7070
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # Seed demo checks on first run
+  seedDemo: false
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── Topology Service ──────────────────────────────────────────────────────────
+topology:
+  enabled: false
+  replicaCount: 1
+
+  image:
+    repository: observex/topology
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8082
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: false
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+
+# ── Trivy Scanner ─────────────────────────────────────────────────────────────
+# Continuous container image vulnerability scanning.
+# Runs as a Deployment, watches K8s pods, scans images with Trivy, and
+# ships results to the ingestor at /v1/security/scans.
+trivyScanner:
+  enabled: true
+
+  image:
+    repository: observex/trivy-scanner
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Scan every N hours. Set lower in high-security environments.
+  scanIntervalHours: 6
+
+  # Minimum CVE severity to report.
+  # Options: UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL
+  minSeverity: MEDIUM
+
+  # Trivy vulnerability DB cache — mount a PVC for faster restarts
+  cacheDir: /trivy-cache
+
+  # PVC for the Trivy DB cache (avoids re-downloading on every pod restart)
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: ""     # uses cluster default if empty
+    accessMode: ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STORAGE BACKENDS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Loki ──────────────────────────────────────────────────────────────────────
+loki:
+  enabled: true
+
+  # Single-binary mode for simplicity. Use distributed mode for high volume.
+  deploymentMode: SingleBinary
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+  loki:
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+    limits_config:
+      retention_period: 720h    # 30 days
+
+  # Disable the Loki chart's bundled dashboard integration (ObserveX provisions its own).
+  grafana:
+    enabled: false
+  test:
+    enabled: false
+  monitoring:
+    selfMonitoring:
+      enabled: false
+      grafanaAgent:
+        installOperator: false
+    lokiCanary:
+      enabled: false
+
+  externalUrl: ""
+
+# ── Tempo ─────────────────────────────────────────────────────────────────────
+tempo:
+  enabled: true
+
+  tempo:
+    retention: 720h    # 30 days
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+
+  service:
+    type: ClusterIP
+    port: 3200
+
+  externalUrl: ""
+
+# ── Neo4j ─────────────────────────────────────────────────────────────────────
+# Topology graph database.
+neo4j:
+  enabled: true
+
+  # Pass-through to the neo4j helm chart
+  neo4j:
+    name: observex-neo4j
+    password: ""    # uses secrets.neo4jPassword if empty
+    plugins:
+      - apoc
+
+  volumes:
+    data:
+      mode: volume
+      volume:
+        persistentVolumeClaim:
+          claimName: ""   # auto-created
+      requests:
+        storage: 20Gi
+    logs:
+      mode: defaultStorageClass
+      requests:
+        storage: 5Gi
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+  externalUrl: ""
+
+# ── PostgreSQL (Bitnami) ──────────────────────────────────────────────────────
+# User management, session, dashboard, SLO, alert rule persistence.
+postgresql:
+  enabled: true
+
+  auth:
+    database: observex
+    username: observex
+    password: ""     # uses secrets.postgresPassword if empty
+    existingSecret: ""
+
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+    # Run migrations on startup
+    initdb:
+      scriptsConfigMap: ""
+
+  metrics:
+    enabled: false
+
+  externalHost: ""
+  externalPort: "5432"
+  externalDatabase: observex
+  externalUsername: observex
+
+# ── Redis (Bitnami) ───────────────────────────────────────────────────────────
+# Query result cache, rate-limit counters, session fast-path.
+redis:
+  enabled: true
+
+  architecture: standalone
+
+  auth:
+    enabled: true
+    password: ""    # auto-generated if empty
+
+  master:
+    persistence:
+      enabled: true
+      size: 4Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  externalHost: ""
+  externalPort: "6379"
+
+# ── ClickHouse (Bitnami) ──────────────────────────────────────────────────────
+# Events, profiling data, synthetic check results.
+clickhouse:
+  enabled: true
+
+  shards: 1
+  replicaCount: 1
+
+  persistence:
+    enabled: true
+    size: 100Gi
+    storageClass: ""
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+  auth:
+    username: default
+    password: ""    # auto-generated if empty
+
+  externalHost: ""
+  externalPort: "8123"
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  INGRESS
+# ══════════════════════════════════════════════════════════════════════════════
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    # Uncomment for TLS via cert-manager:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  tls:
+    enabled: false
+    secretName: "observex-tls"
+    certManager:
+      clusterIssuer: ""   # e.g. "letsencrypt-prod"
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RBAC / SECURITY
+# ══════════════════════════════════════════════════════════════════════════════
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Pod Security Standards policy
+podSecurityPolicy:
+  enabled: false
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  NETWORK POLICY
+# ══════════════════════════════════════════════════════════════════════════════
+networkPolicy:
+  # When enabled, restricts inter-service traffic to only what is needed.
+  enabled: false
+  # Additional ingress rules for the API Gateway (e.g., allow from your VPN CIDR)
+  additionalApiGatewayIngress: []
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  F6.1 TLS CERTIFICATE EXPIRY DETECTION (dedicated synthetic probe, G-1)
+# ══════════════════════════════════════════════════════════════════════════════
+# Disabled by default: enabling it changes nothing for existing releases until
+# set to true. Everything below is PROPOSED (Increment-3 decision record); see
+# templates/f61.yaml for what is rendered.
+#
+# Before enabling:
+#   1. Create the probe credential signing key (PROPOSED KEY-1). It must differ
+#      from the JWT secret and the internal token:
+#        kubectl create secret generic observex-synthetic-probe-key \
+#          --from-literal=key="$(openssl rand -base64 48)"
+#   2. Create the processor probe-listener certificate as a kubernetes.io/tls
+#      Secret (for example with cert-manager) whose subjectAltName contains the
+#      DNS name <fullname>-processor-probe-intake.<namespace>.svc — exactly
+#      the name in-cluster probes dial and verify (the rendered intake Service
+#      shows it in its observex.io/tls-server-name annotation) — and set
+#      f61.intake.tlsSecret. Put the issuing CA in a Secret for the probes
+#      (f61.probe.processorCASecret). Probes outside the cluster use
+#      f61.probe.processorUrl; add that URL's host name to the SANs as well.
+#   3. Apply migrations 001–009 (f61.migrations, or scripts/db-migrate.sh).
+#   4. Per vantage: issue a credential (POST /api/v1/synthetic/probe-credentials
+#      as an org admin), store it in its own Secret, add the vantage below.
+f61:
+  enabled: false
+
+  # Operator-provisioned Secret with the probe credential signing key. It is
+  # mounted as a file into the api-gateway (issuance) and processor (intake)
+  # only; probes never see it.
+  probeKeySecret:
+    name: observex-synthetic-probe-key
+    key: key
+
+  # Expiry horizon (PROPOSED HORIZON-1): certificates expiring within it are
+  # "expiring". Go duration between 24h and 8760h.
+  horizon: "720h"
+
+  database:
+    # Secret holding the processor's full PostgreSQL DSN (recommended). When
+    # name is empty the DSN is composed from the postgresql values and the
+    # chart secret's postgres-password, which must then be URL-safe.
+    dsnSecret:
+      name: ""
+      key: postgres-dsn
+    # sslmode for the composed DSN. The chart's existing services use
+    # "disable" against the in-cluster database; use "verify-full" (with a
+    # dsnSecret) for an external database.
+    sslMode: disable
+
+  # The processor's dedicated probe listener (PROPOSED EGRESS-1). It serves
+  # only the probe work and intake routes, never the internal API.
+  intake:
+    port: 8443
+    # kubernetes.io/tls Secret for the listener. Required unless
+    # insecurePlaintext is true. A renewed Secret is picked up without restart.
+    tlsSecret: ""
+    # Development only: serve plaintext. Probe credentials then cross the
+    # network in clear.
+    insecurePlaintext: false
+    service:
+      type: ClusterIP
+      annotations: {}
+    # Extra NetworkPolicy peers allowed to reach the listener (for example the
+    # ingress controller's namespace when f61.ingress is enabled).
+    ingressFrom: []
+    # - namespaceSelector:
+    #     matchLabels:
+    #       kubernetes.io/metadata.name: ingress-nginx
+
+  # Optional Ingress for probes running outside the cluster. The backend is
+  # TLS, so the controller must speak HTTPS to it.
+  ingress:
+    enabled: false
+    host: ""
+    className: ""
+    tlsSecret: ""
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+
+  probe:
+    image:
+      repository: observex/synthetic-probe
+      tag: ""
+      pullPolicy: IfNotPresent
+    # Processor probe origin. Empty: the in-cluster listener Service.
+    processorUrl: ""
+    # Secret with the CA that issued the listener certificate. Empty: the
+    # probe verifies against its system roots.
+    processorCASecret:
+      name: ""
+      key: ca.crt
+    maxInFlight: 8
+    # Probe targets on private, loopback or link-local addresses are refused
+    # (SSRF guard) unless this is true. A vantage can override it.
+    allowPrivateTargets: false
+    # Destination ports probes may reach (NetworkPolicy egress).
+    targetPorts: [443]
+    resources:
+      requests:
+        cpu: 20m
+        memory: 32Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+  # One Deployment per vantage (G-1). The credential Secret holds the value
+  # returned by the issuance endpoint, for example:
+  #   kubectl create secret generic observex-probe-eu-west \
+  #     --from-literal=credential='oxpt_…'
+  # A vantage's network zone is fixed in its credential at issuance; checks
+  # whose locations name that zone (or "*") are assigned to it.
+  vantages: []
+  # - name: eu-west                    # DNS-1123 label, at most 40 characters
+  #   credentialSecret: observex-probe-eu-west
+  #   credentialKey: credential
+  #   allowPrivateTargets: false
+  #   nodeSelector: {}
+  #   tolerations: []
+  #   affinity: {}
+
+  # Schema migrations. The migration mechanism is open decision D-03; this Job
+  # (scripts/db-migrate.sh: every file, in order, idempotently) is an interim
+  # tool and is off by default.
+  migrations:
+    job:
+      enabled: false
+    image:
+      repository: observex/db-migrate
+      tag: ""
+      pullPolicy: IfNotPresent
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MISCELLANEOUS
+# ══════════════════════════════════════════════════════════════════════════════
+nameOverride: ""
+fullnameOverride: ""
+
+# Extra manifests to deploy (raw YAML strings)
+extraManifests: []

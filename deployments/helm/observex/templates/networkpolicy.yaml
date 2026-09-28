@@ -1,0 +1,354 @@
+{{/*
+networkpolicy.yaml
+Zero-trust network policies for ObserveX.
+
+When networkPolicy.enabled=true, all inter-pod traffic is denied by default.
+Only explicitly permitted flows are allowed:
+  - Ingress → Ingestor (port 4318)
+  - Ingestor → Processor (port 8080)
+  - Processor → AI Agent (port 8080)
+  - API Gateway → all backend services
+  - All services → storage backends
+  - OneAgent → Ingestor (port 4318)
+  - Kubernetes API server → all (for health checks)
+  - DNS (port 53 UDP/TCP) is always allowed
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+
+# ── Default deny all ingress for the observex namespace ──────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observex.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # Allow DNS resolution from all pods
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+# ── Ingestor: accepts from OneAgent, API Gateway, SDK, and external agents ───
+{{- if .Values.ingestor.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observex.fullname" . }}-ingestor
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestor
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ingestor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow from any pod in the same namespace (OneAgent, SDK-instrumented apps)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - port: 4318
+    # Allow from the Ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 4318
+    {{- with .Values.networkPolicy.additionalApiGatewayIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    # Send logs to Loki
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - port: 3100
+    # Send traces to Tempo
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - port: 3200
+        - port: 4317
+        - port: 4318
+    # Send events to ClickHouse
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: clickhouse
+      ports:
+        - port: 8123
+    # Forward topology to Processor
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: processor
+      ports:
+        - port: 8080
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- end }}
+
+# ── Processor: accepts from Ingestor and API Gateway ─────────────────────────
+{{- if .Values.processor.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observex.fullname" . }}-processor
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: processor
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: processor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: ingestor
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api-gateway
+      ports:
+        - port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: ai-agent
+      ports:
+        - port: 8080
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- end }}
+
+# ── AI Agent: accepts from Processor and API Gateway ─────────────────────────
+{{- if .Values.aiAgent.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observex.fullname" . }}-ai-agent
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ai-agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: processor
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api-gateway
+      ports:
+        - port: 8080
+  egress:
+    # Kubernetes API server (for pod restart, scale, cordon, etc.)
+    - ports:
+        - port: 443
+        - port: 6443
+    # Slack / PagerDuty webhooks over HTTPS
+    - ports:
+        - port: 443
+    # SMTP for email alerts
+    - ports:
+        - port: 587
+        - port: 465
+        - port: 25
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- end }}
+
+# ── API Gateway: accepts from Ingress controller and all internal services ────
+{{- if .Values.apiGateway.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observex.fullname" . }}-api-gateway
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # From Ingress controller
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - port: 3001
+    {{- with .Values.networkPolicy.additionalApiGatewayIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    # All internal services
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+    # PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+    # Native metrics and events
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: clickhouse
+      ports:
+        - port: 8123
+    # Loki
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: loki
+      ports:
+        - port: 3100
+    # Tempo
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tempo
+      ports:
+        - port: 3200
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- end }}
+
+# ── OneAgent: can only send to Ingestor ──────────────────────────────────────
+{{- if .Values.oneagent.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observex.fullname" . }}-oneagent
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: oneagent
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: oneagent
+  policyTypes:
+    - Egress
+  egress:
+    # Send telemetry only to the Ingestor
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: ingestor
+      ports:
+        - port: 4318
+    # Kubernetes API server (for pod/node discovery via client-go)
+    - ports:
+        - port: 443
+        - port: 6443
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+{{- end }}
+
+# ── Storage backends: accept only from ObserveX services ─────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observex.fullname" . }}-storage-access
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+spec:
+  # Matches all non-observex pods (i.e., the storage backends)
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - postgresql
+          - redis
+          - clickhouse
+          - loki
+          - tempo
+          - neo4j
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only ObserveX application pods may talk to storage
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "observex.selectorLabels" . | nindent 14 }}
+
+{{- end }}

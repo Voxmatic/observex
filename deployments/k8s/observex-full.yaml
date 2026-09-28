@@ -1,0 +1,567 @@
+---
+# ════════════════════════════════════════════════════════
+#  ObserveX — Production Kubernetes Deployment
+#  One kubectl apply -f to deploy everything
+# ════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observex
+
+---
+# ═══ OneAgent DaemonSet ════════════════════════════════
+# Runs on EVERY node — auto-discovers all services
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: observex-oneagent
+  namespace: observex
+  labels:
+    app: observex-oneagent
+spec:
+  selector:
+    matchLabels:
+      app: observex-oneagent
+  template:
+    metadata:
+      labels:
+        app: observex-oneagent
+    spec:
+      serviceAccountName: observex-agent
+      hostPID: true      # required: process scanner reads /proc/<pid>
+      hostNetwork: true  # required: network topology from /proc/net
+      tolerations:
+        - operator: Exists   # runs on ALL nodes including masters
+      containers:
+        - name: oneagent
+          image: observex/oneagent:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true  # required: eBPF, cgroup reads
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CLUSTER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['cluster-name']
+            - name: INGESTOR_URL
+              value: "http://observex-ingestor.observex:4318"
+            - name: ENABLE_EBPF
+              value: "true"
+            - name: ENABLE_K8S
+              value: "true"
+            - name: ENABLE_PROC
+              value: "true"
+            - name: OBSERVEX_COLLECTION_MODE
+              value: "native"
+            - name: ENABLE_NATIVE_METRICS
+              value: "true"
+            - name: OBSERVEX_STATE_DIR
+              value: "/var/lib/observex/oneagent"
+          volumeMounts:
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: false
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - name: state
+              mountPath: /var/lib/observex
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: state
+          hostPath:
+            path: /var/lib/observex
+            type: DirectoryOrCreate
+
+---
+# ═══ ServiceAccount + RBAC for OneAgent ════════════════
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: observex-agent
+  namespace: observex
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: observex-agent
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, services, endpoints, namespaces, events, secrets, configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods, nodes]
+    verbs: [get, list]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: observex-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: observex-agent
+subjects:
+  - kind: ServiceAccount
+    name: observex-agent
+    namespace: observex
+
+---
+# ═══ ServiceAccount + RBAC for AI Agent ════════════════
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: observex-ai-agent
+  namespace: observex
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: observex-ai-agent
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, services, endpoints, namespaces, events, secrets, configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete, patch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [patch, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [delete]
+  - apiGroups: [apps]
+    resources: [deployments/scale, statefulsets/scale]
+    verbs: [get, update, patch]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: observex-ai-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: observex-ai-agent
+subjects:
+  - kind: ServiceAccount
+    name: observex-ai-agent
+    namespace: observex
+
+---
+# ═══ Secrets ════════════════════════════════════════════
+apiVersion: v1
+kind: Secret
+metadata:
+  name: observex-secrets
+  namespace: observex
+type: Opaque
+stringData:
+  SLACK_WEBHOOK_URL: ""
+  PAGERDUTY_ROUTING_KEY: ""
+  EMAIL_SMTP_USER: ""
+  EMAIL_SMTP_PASSWORD: ""
+  JWT_SECRET: "change-this-to-a-random-256-bit-string"
+  ADMIN_PASSWORD: "change-this-password"
+
+---
+# ═══ Ingestor ═══════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observex-ingestor
+  namespace: observex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: observex-ingestor
+  template:
+    metadata:
+      labels:
+        app: observex-ingestor
+    spec:
+      containers:
+        - name: ingestor
+          image: observex/ingestor:latest
+          ports:
+            - containerPort: 4318
+          env:
+            - name: LOKI_URL
+              value: http://observex-loki:3100
+            - name: TEMPO_URL
+              value: http://observex-tempo:3200
+            - name: CLICKHOUSE_URL
+              value: http://observex-clickhouse:8123
+            - name: PROCESSOR_URL
+              value: http://observex-processor:8080
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observex-ingestor
+  namespace: observex
+spec:
+  selector:
+    app: observex-ingestor
+  ports:
+    - port: 4318
+      targetPort: 4318
+
+---
+# ═══ Processor ══════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observex-processor
+  namespace: observex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: observex-processor
+  template:
+    metadata:
+      labels:
+        app: observex-processor
+    spec:
+      containers:
+        - name: processor
+          image: observex/processor:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AI_AGENT_URL
+              value: http://observex-ai-agent:8080
+            - name: CLICKHOUSE_URL
+              value: http://observex-clickhouse:8123
+            - name: INGESTOR_URL
+              value: http://observex-ingestor:4318
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observex-processor
+  namespace: observex
+spec:
+  selector:
+    app: observex-processor
+  ports:
+    - port: 8080
+      targetPort: 8080
+
+---
+# ═══ Native Query Engine ═════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observex-query-engine
+  namespace: observex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: observex-query-engine
+  template:
+    metadata:
+      labels:
+        app: observex-query-engine
+    spec:
+      containers:
+        - name: query-engine
+          image: observex/query-engine:latest
+          ports:
+            - containerPort: 9090
+          env:
+            - name: CLICKHOUSE_URL
+              value: http://observex-clickhouse:8123
+            - name: LOKI_URL
+              value: http://observex-loki:3100
+            - name: TEMPO_URL
+              value: http://observex-tempo:3200
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 15
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observex-query-engine
+  namespace: observex
+spec:
+  selector:
+    app: observex-query-engine
+  ports:
+    - port: 9090
+      targetPort: 9090
+
+---
+# ═══ AI Agent ═══════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observex-ai-agent
+  namespace: observex
+spec:
+  replicas: 1   # Only 1 — multiple agents would duplicate actions
+  selector:
+    matchLabels:
+      app: observex-ai-agent
+  template:
+    metadata:
+      labels:
+        app: observex-ai-agent
+    spec:
+      serviceAccountName: observex-ai-agent
+      containers:
+        - name: ai-agent
+          image: observex/ai-agent:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DRY_RUN
+              value: "false"
+            - name: CLUSTER_NAME
+              value: "production"
+            - name: PROCESSOR_URL
+              value: http://observex-processor:8080
+            - name: DASHBOARD_URL
+              value: https://observex.yourcompany.com
+            - name: ALLOWED_NAMESPACES
+              value: "default,production,staging"
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: observex-secrets
+                  key: SLACK_WEBHOOK_URL
+            - name: PAGERDUTY_ROUTING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: observex-secrets
+                  key: PAGERDUTY_ROUTING_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observex-ai-agent
+  namespace: observex
+spec:
+  selector:
+    app: observex-ai-agent
+  ports:
+    - port: 8080
+      targetPort: 8080
+
+---
+# ═══ API Gateway ════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observex-api-gateway
+  namespace: observex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: observex-api-gateway
+  template:
+    metadata:
+      labels:
+        app: observex-api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: observex/api-gateway:latest
+          ports:
+            - containerPort: 3001
+          env:
+            - name: PROCESSOR_URL
+              value: http://observex-processor:8080
+            - name: AI_AGENT_URL
+              value: http://observex-ai-agent:8080
+            - name: QUERY_ENGINE_URL
+              value: http://observex-query-engine:9090
+            - name: CLICKHOUSE_URL
+              value: http://observex-clickhouse:8123
+            - name: LOKI_URL
+              value: http://observex-loki:3100
+            - name: TEMPO_URL
+              value: http://observex-tempo:3200
+            - name: INGESTOR_URL
+              value: http://observex-ingestor:4318
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: observex-secrets
+                  key: JWT_SECRET
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: observex-secrets
+                  key: ADMIN_PASSWORD
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observex-api-gateway
+  namespace: observex
+spec:
+  selector:
+    app: observex-api-gateway
+  ports:
+    - port: 3001
+      targetPort: 3001
+
+---
+# ═══ Frontend ═══════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observex-frontend
+  namespace: observex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: observex-frontend
+  template:
+    metadata:
+      labels:
+        app: observex-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: observex/frontend:latest
+          ports:
+            - containerPort: 80
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observex-frontend
+  namespace: observex
+spec:
+  selector:
+    app: observex-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+
+---
+# ═══ Ingress ════════════════════════════════════════════
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: observex
+  namespace: observex
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - observex.yourcompany.com
+      secretName: observex-tls
+  rules:
+    - host: observex.yourcompany.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: observex-api-gateway
+                port:
+                  number: 3001
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: observex-api-gateway
+                port:
+                  number: 3001
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: observex-frontend
+                port:
+                  number: 80

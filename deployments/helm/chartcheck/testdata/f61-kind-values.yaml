@@ -1,0 +1,24 @@
+# F6.1 OPS-1 test configuration: one vantage, NetworkPolicies on, migration
+# Job rendered (still disabled by default in values.yaml). Used by the static
+# chart checks in this directory AND by the external kind runbook
+# (docs/validation/f61-ops-1-external-runbook.md), so both check the same
+# configuration. Names only; no secret values.
+image:
+  tag: f61-validation          # pre-existing: the db-monitor Deployment reads .Values.image.tag
+trivyScanner:
+  enabled: false               # pre-existing defect P1: trivy-scanner.yaml cannot render
+networkPolicy:
+  enabled: true
+f61:
+  enabled: true
+  intake:
+    tlsSecret: observex-f61-intake-tls
+  probe:
+    processorCASecret:
+      name: observex-f61-intake-ca
+  vantages:
+    - name: kind-a
+      credentialSecret: observex-probe-kind-a
+  migrations:
+    job:
+      enabled: true

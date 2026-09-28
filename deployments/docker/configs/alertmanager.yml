@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'service']
+  group_wait: 10s
+  group_interval: 10m
+  repeat_interval: 1h
+  receiver: 'observex-webhook'
+
+receivers:
+  - name: 'observex-webhook'
+    webhook_configs:
+      - url: 'http://api-gateway:3001/api/v1/alerts/webhook'
+        send_resolved: true

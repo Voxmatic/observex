@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ObserveX Agent SaaS Demo</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-2: #eef3f1;
+      --ink: #18212b;
+      --muted: #667483;
+      --line: #dbe2e8;
+      --green: #138a63;
+      --teal: #0d766e;
+      --blue: #2563eb;
+      --amber: #b7791f;
+      --red: #b42318;
+      --shadow: 0 10px 26px rgba(24, 33, 43, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    button, input, select { font: inherit; }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 248px 1fr;
+    }
+    aside {
+      background: #ffffff;
+      border-right: 1px solid var(--line);
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 8px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: conic-gradient(from 120deg, var(--green), var(--blue), var(--amber), var(--green));
+      position: relative;
+    }
+    .mark::after {
+      content: "";
+      position: absolute;
+      inset: 8px;
+      background: #fff;
+      border-radius: 6px;
+    }
+    .brand strong { font-size: 17px; }
+    .brand span { display: block; color: var(--muted); font-size: 12px; }
+    nav { display: grid; gap: 4px; }
+    nav button {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border: 0;
+      background: transparent;
+      color: #40505f;
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: left;
+    }
+    nav button.active {
+      background: #e8f3ef;
+      color: #0f6048;
+      font-weight: 700;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+    main {
+      padding: 22px;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 18px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1 { margin: 0; font-size: 24px; line-height: 1.2; }
+    .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      min-height: 38px;
+      padding: 0 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 1px 0 rgba(24, 33, 43, 0.04);
+    }
+    .btn.primary { background: var(--green); border-color: var(--green); color: #fff; }
+    .btn.blue { background: var(--blue); border-color: var(--blue); color: #fff; }
+    .btn:disabled { opacity: 0.55; cursor: default; }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 12px;
+    }
+    .kpi, .panel, .codebox {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+    .kpi { padding: 14px; }
+    .kpi span { color: var(--muted); font-size: 12px; }
+    .kpi strong { display: block; margin-top: 6px; font-size: 24px; }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      gap: 16px;
+      min-height: 0;
+    }
+    .panel { padding: 16px; min-width: 0; }
+    .panel h2 { margin: 0 0 12px; font-size: 16px; }
+    .field { display: grid; gap: 6px; margin-bottom: 12px; }
+    label { color: #42505d; font-size: 12px; font-weight: 700; }
+    input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 8px;
+      padding: 10px 11px;
+      color: var(--ink);
+      min-height: 40px;
+    }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .seg {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+    .seg button {
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: #fff;
+      padding: 10px 8px;
+      cursor: pointer;
+      color: #40505f;
+    }
+    .seg button:last-child { border-right: 0; }
+    .seg button.active { background: #eaf1ff; color: #1d4ed8; font-weight: 700; }
+    .codebox {
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 390px;
+    }
+    .codehead {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: #fbfcfd;
+    }
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.55;
+      color: #143026;
+      background: #fbfcfd;
+      white-space: pre-wrap;
+      min-height: 0;
+    }
+    .rightcol {
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+    }
+    .topology {
+      height: 260px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+      min-height: 74px;
+    }
+    .step span { color: var(--muted); font-size: 11px; }
+    .step strong { display: block; margin-top: 4px; font-size: 13px; }
+    .step.active { border-color: #87c7ae; background: #edf8f4; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: middle;
+    }
+    th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: #eef3f1;
+      color: #285545;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .pill.warn { background: #fff4db; color: #7a4d00; }
+    .pill.blue { background: #eaf1ff; color: #1d4ed8; }
+    .pill.bad { background: #ffe9e6; color: var(--red); }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .metricline {
+      background: #f8fafb;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 11px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      background: #10231d;
+      color: #fff;
+      padding: 12px 14px;
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: 180ms ease;
+      pointer-events: none;
+      font-size: 13px;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      aside { display: none; }
+      main { padding: 14px; }
+      .grid, .kpis, .metrics { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .toolbar { justify-content: flex-start; }
+      .timeline { grid-template-columns: 1fr; }
+      table { min-width: 760px; }
+      .tablewrap { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <strong>ObserveX</strong>
+          <span>SaaS control plane</span>
+        </div>
+      </div>
+      <nav>
+        <button class="active"><span class="dot"></span>Agent rollout</button>
+        <button><span class="dot"></span>Fleet health</button>
+        <button><span class="dot"></span>Metrics ingest</button>
+        <button><span class="dot"></span>ActiveGate zones</button>
+      </nav>
+    </aside>
+    <main>
+      <section class="topbar">
+        <div>
+          <h1>ObserveX Agent deployment</h1>
+          <p class="sub">Production-style SaaS install flow backed by token, config, heartbeat, ActiveGate and native ObserveX telemetry.</p>
+        </div>
+        <div class="toolbar">
+          <button id="tokenBtn" class="btn primary">Generate token</button>
+          <button id="installBtn" class="btn blue">Simulate install</button>
+          <button id="heartbeatBtn" class="btn">Send heartbeat</button>
+        </div>
+      </section>
+
+      <section class="kpis">
+        <div class="kpi"><span>Active agents</span><strong id="activeAgents">2</strong></div>
+        <div class="kpi"><span>Fleet version</span><strong>2.0.0</strong></div>
+        <div class="kpi"><span>Metric path</span><strong>Native</strong></div>
+        <div class="kpi"><span>Network zones</span><strong id="zoneCount">2</strong></div>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <h2>Install package</h2>
+          <div class="seg" role="tablist" aria-label="Platform">
+            <button class="active" data-platform="linux">Linux</button>
+            <button data-platform="windows">Windows</button>
+            <button data-platform="kubernetes">Kubernetes</button>
+          </div>
+          <div class="split">
+            <div class="field">
+              <label for="tenant">Tenant URL</label>
+              <input id="tenant" value="https://app.observex.io" />
+            </div>
+            <div class="field">
+              <label for="ingest">Ingest URL</label>
+              <input id="ingest" value="https://ingest.observex.io" />
+            </div>
+          </div>
+          <div class="split">
+            <div class="field">
+              <label for="env">Environment ID</label>
+              <input id="env" value="env-prod-01" />
+            </div>
+            <div class="field">
+              <label for="hostGroup">Host group</label>
+              <input id="hostGroup" value="payments-prod" />
+            </div>
+          </div>
+          <div class="split">
+            <div class="field">
+              <label for="zone">Network zone</label>
+              <select id="zone">
+                <option>public-saas</option>
+                <option selected>private-activegate-mumbai</option>
+                <option>private-activegate-us-east</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="mode">Monitoring mode</label>
+              <select id="mode">
+                <option selected>fullstack</option>
+                <option>infrastructure</option>
+                <option>discovery-only</option>
+              </select>
+            </div>
+          </div>
+          <button id="renderBtn" class="btn">Refresh installer</button>
+        </div>
+
+        <div class="codebox">
+          <div class="codehead">
+            <strong id="artifactTitle">observex-agent-linux.sh</strong>
+            <span class="pill blue" id="tokenState">token pending</span>
+          </div>
+          <pre id="scriptOut"></pre>
+        </div>
+      </section>
+
+      <section class="rightcol">
+        <div class="panel">
+          <h2>Live agent path</h2>
+          <div class="topology"><canvas id="topologyCanvas"></canvas></div>
+          <div class="timeline">
+            <div class="step active" data-step="0"><span>1</span><strong>Installer token</strong></div>
+            <div class="step" data-step="1"><span>2</span><strong>Agent config</strong></div>
+            <div class="step" data-step="2"><span>3</span><strong>Native collectors</strong></div>
+            <div class="step" data-step="3"><span>4</span><strong>ActiveGate route</strong></div>
+            <div class="step" data-step="4"><span>5</span><strong>SaaS fleet state</strong></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Fleet inventory</h2>
+          <div class="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Agent</th><th>Node</th><th>Host group</th><th>Zone</th><th>Mode</th><th>Status</th><th>Last seen</th>
+                </tr>
+              </thead>
+              <tbody id="fleetRows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Native samples sent to ObserveX</h2>
+          <div class="metrics" id="metricRows"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const state = {
+      platform: 'linux',
+      token: '',
+      step: 0,
+      agents: [
+        { id: 'agent-pay-01', node: 'ip-10-12-1-44', hostGroup: 'payments-prod', zone: 'private-activegate-mumbai', mode: 'fullstack', status: 'active', seen: '8s ago' },
+        { id: 'agent-core-03', node: 'aks-nodepool-3', hostGroup: 'core-prod', zone: 'public-saas', mode: 'fullstack', status: 'active', seen: '13s ago' },
+      ],
+    }
+
+    const el = id => document.getElementById(id)
+
+    function shortToken() {
+      if (!state.token) return 'token pending'
+      return state.token.slice(0, 16) + '...' + state.token.slice(-8)
+    }
+
+    function randomHex(size) {
+      const chars = 'abcdef0123456789'
+      let out = ''
+      for (let i = 0; i < size; i++) out += chars[Math.floor(Math.random() * chars.length)]
+      return out
+    }
+
+    function values() {
+      return {
+        tenant: el('tenant').value.trim(),
+        ingest: el('ingest').value.trim(),
+        env: el('env').value.trim(),
+        hostGroup: el('hostGroup').value.trim(),
+        zone: el('zone').value,
+        mode: el('mode').value,
+        token: state.token || 'click-generate-token-first',
+      }
+    }
+
+    function agentConfig(v) {
+      return `token: "${v.token}"
+org_id: "${v.env}"
+tenant_url: "${v.tenant}"
+ingestor_url: "${v.ingest}"
+agent_version: "2.0.0"
+monitoring_mode: "${v.mode}"
+collection_mode: "native"
+environment: "production"
+host_group: "${v.hostGroup}"
+network_zone: "${v.zone}"
+log_monitoring: true
+process_discovery: true
+k8s_monitoring: true
+ebpf_enabled: true
+profiling_enabled: true
+native_metrics: false
+auto_update: true
+update_channel: "stable"
+scrape_interval_s: 15
+heartbeat_interval_s: 10`
+    }
+
+    function renderInstaller() {
+      const v = values()
+      const cfg = agentConfig(v)
+      const platform = state.platform
+      let title = 'observex-agent-linux.sh'
+      let script = ''
+      if (platform === 'linux') {
+        script = `#!/usr/bin/env bash
+set -euo pipefail
+
+sudo install -d -m 0755 /opt/observex/agent /etc/observex /var/lib/observex
+cat <<'OBSERVEX_CONFIG' | sudo tee /etc/observex/agent.yaml >/dev/null
+${cfg}
+OBSERVEX_CONFIG
+
+sudo curl -fsSL "${v.tenant}/downloads/observex-agent/linux/amd64/2.0.0/observex-agent" \\
+  -o /opt/observex/agent/observex-agent
+sudo chmod 0755 /opt/observex/agent/observex-agent
+
+cat <<'SYSTEMD' | sudo tee /etc/systemd/system/observex-agent.service >/dev/null
+[Unit]
+Description=ObserveX Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/observex/agent/observex-agent --config /etc/observex/agent.yaml
+Restart=always
+RestartSec=10
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now observex-agent`
+      }
+      if (platform === 'windows') {
+        title = 'observex-agent-windows.ps1'
+        script = `$ErrorActionPreference = "Stop"
+$InstallDir = "C:\\Program Files\\ObserveX\\Agent"
+$ConfigDir = "C:\\ProgramData\\ObserveX"
+New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
+@'
+${cfg}
+'@ | Set-Content -Path "$ConfigDir\\agent.yaml" -Encoding UTF8
+
+Invoke-WebRequest -Uri "${v.tenant}/downloads/observex-agent/windows/amd64/2.0.0/observex-agent.exe" \`
+  -OutFile "$InstallDir\\observex-agent.exe"
+New-Service -Name "ObserveXAgent" -DisplayName "ObserveX Agent" \`
+  -BinaryPathName "\`"$InstallDir\\observex-agent.exe\`" --config \`"$ConfigDir\\agent.yaml\`"" \`
+  -StartupType Automatic
+Start-Service ObserveXAgent`
+      }
+      if (platform === 'kubernetes') {
+        title = 'observex-agent-kubernetes.yaml'
+        script = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: observex
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: observex-agent-secret
+  namespace: observex
+type: Opaque
+stringData:
+  token: "${v.token}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observex-agent-config
+  namespace: observex
+data:
+  agent.yaml: |
+${cfg.split('\\n').map(line => '    ' + line).join('\\n')}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: observex-agent
+  namespace: observex
+spec:
+  selector:
+    matchLabels:
+      app: observex-agent
+  template:
+    metadata:
+      labels:
+        app: observex-agent
+    spec:
+      serviceAccountName: observex-agent
+      hostPID: true
+      hostNetwork: true
+      containers:
+        - name: observex-agent
+          image: ghcr.io/observex/agent:2.0.0
+          args: ["--config", "/etc/observex/agent.yaml"]
+          securityContext:
+            privileged: true`
+      }
+      el('artifactTitle').textContent = title
+      el('scriptOut').textContent = script
+      el('tokenState').textContent = shortToken()
+    }
+
+    function renderFleet() {
+      const rows = state.agents.map(a => `
+        <tr>
+          <td><strong>${a.id}</strong></td>
+          <td>${a.node}</td>
+          <td>${a.hostGroup}</td>
+          <td>${a.zone}</td>
+          <td><span class="pill blue">${a.mode}</span></td>
+          <td><span class="pill ${a.status === 'active' ? '' : 'bad'}">${a.status}</span></td>
+          <td>${a.seen}</td>
+        </tr>`).join('')
+      el('fleetRows').innerHTML = rows
+      el('activeAgents').textContent = state.agents.filter(a => a.status === 'active').length
+      el('zoneCount').textContent = new Set(state.agents.map(a => a.zone)).size
+    }
+
+    function renderMetrics() {
+      const v = values()
+      const metrics = [
+        `observex_agent_up{org="${v.env}",host_group="${v.hostGroup}",network_zone="${v.zone}",monitoring_mode="${v.mode}",collection_mode="native"} 1`,
+        `node_cpu_seconds_total{agent_id="agent-new-${randomHex(2)}",mode="idle"} ${(1800 + Math.random() * 400).toFixed(2)}`,
+        `node_memory_MemAvailable_bytes{cluster="default",node="new-linux-host"} ${Math.floor(9.4e9 + Math.random() * 2e8)}`,
+        `observex_native_samples_total{tenant="${v.env}",source="observex-agent"} ${Math.floor(42000 + Math.random() * 3000)}`,
+      ]
+      el('metricRows').innerHTML = metrics.map(m => `<div class="metricline">${m}</div>`).join('')
+    }
+
+    function setStep(step) {
+      state.step = step
+      document.querySelectorAll('.step').forEach((node, index) => {
+        node.classList.toggle('active', index <= step)
+      })
+    }
+
+    function toast(msg) {
+      const box = el('toast')
+      box.textContent = msg
+      box.classList.add('show')
+      setTimeout(() => box.classList.remove('show'), 1800)
+    }
+
+    function drawTopology() {
+      const canvas = el('topologyCanvas')
+      const rect = canvas.getBoundingClientRect()
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = rect.width * dpr
+      canvas.height = rect.height * dpr
+      const ctx = canvas.getContext('2d')
+      ctx.scale(dpr, dpr)
+      ctx.clearRect(0, 0, rect.width, rect.height)
+
+      const nodes = [
+        { x: 80, y: 132, label: 'Host', color: '#138a63' },
+        { x: rect.width * 0.34, y: 82, label: 'Agent', color: '#2563eb' },
+        { x: rect.width * 0.56, y: 154, label: 'ActiveGate', color: '#b7791f' },
+        { x: rect.width - 105, y: 102, label: 'ObserveX SaaS', color: '#0d766e' },
+      ]
+      const links = [[0,1],[1,2],[2,3]]
+      ctx.lineWidth = 2
+      links.forEach(([a, b], idx) => {
+        const from = nodes[a], to = nodes[b]
+        ctx.strokeStyle = idx <= state.step - 1 ? '#138a63' : '#dbe2e8'
+        ctx.beginPath()
+        ctx.moveTo(from.x, from.y)
+        ctx.bezierCurveTo((from.x + to.x) / 2, from.y - 40, (from.x + to.x) / 2, to.y + 40, to.x, to.y)
+        ctx.stroke()
+      })
+      nodes.forEach((n, idx) => {
+        ctx.fillStyle = '#ffffff'
+        ctx.strokeStyle = idx <= state.step ? n.color : '#cbd5df'
+        ctx.lineWidth = 3
+        ctx.beginPath()
+        ctx.arc(n.x, n.y, 28, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.stroke()
+        ctx.fillStyle = idx <= state.step ? n.color : '#7b8794'
+        ctx.beginPath()
+        ctx.arc(n.x, n.y, 7, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillStyle = '#24313d'
+        ctx.font = '600 12px Inter, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.fillText(n.label, n.x, n.y + 48)
+      })
+    }
+
+    document.querySelectorAll('[data-platform]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('[data-platform]').forEach(b => b.classList.remove('active'))
+        btn.classList.add('active')
+        state.platform = btn.dataset.platform
+        renderInstaller()
+      })
+    })
+
+    el('renderBtn').addEventListener('click', () => {
+      renderInstaller()
+      renderMetrics()
+      toast('Installer refreshed')
+    })
+    el('tokenBtn').addEventListener('click', () => {
+      state.token = 'oxat_' + randomHex(20) + '.' + randomHex(32)
+      setStep(1)
+      renderInstaller()
+      toast('Deployment token generated')
+    })
+    el('installBtn').addEventListener('click', () => {
+      const v = values()
+      const agent = {
+        id: 'agent-new-' + randomHex(3),
+        node: state.platform === 'kubernetes' ? 'worker-' + randomHex(2) : 'new-' + state.platform + '-host',
+        hostGroup: v.hostGroup,
+        zone: v.zone,
+        mode: v.mode,
+        status: 'active',
+        seen: 'now',
+      }
+      state.agents.unshift(agent)
+      setStep(3)
+      renderFleet()
+      renderMetrics()
+      toast('Agent registered with SaaS fleet')
+    })
+    el('heartbeatBtn').addEventListener('click', () => {
+      state.agents = state.agents.map((a, i) => ({ ...a, seen: i === 0 ? 'now' : (8 + i * 7) + 's ago' }))
+      setStep(4)
+      renderFleet()
+      renderMetrics()
+      toast('Heartbeat accepted by ingestor')
+    })
+    ;['tenant', 'ingest', 'env', 'hostGroup', 'zone', 'mode'].forEach(id => {
+      el(id).addEventListener('input', renderInstaller)
+      el(id).addEventListener('change', () => { renderInstaller(); renderMetrics() })
+    })
+
+    setInterval(() => {
+      state.agents = state.agents.map((a, i) => ({ ...a, seen: i === 0 && state.step >= 4 ? 'now' : a.seen }))
+      drawTopology()
+    }, 900)
+    window.addEventListener('resize', drawTopology)
+    renderInstaller()
+    renderFleet()
+    renderMetrics()
+    drawTopology()
+  </script>
+</body>
+</html>

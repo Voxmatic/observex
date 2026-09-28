@@ -1,0 +1,191 @@
+{{- if .Values.trivyScanner.enabled }}
+# templates/trivy-scanner.yaml
+# Trivy container image vulnerability scanner deployment.
+# Runs continuously: watches K8s pods and scans images found.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "observex.fullname" . }}-trivy-scanner
+  namespace: {{ .Release.Namespace }}
+  labels: {{ include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trivy-scanner
+  annotations:
+    checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "observex.fullname" . }}-trivy-scanner
+  labels: {{ include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trivy-scanner
+rules:
+  # Read all pods across all namespaces to discover running container images
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Read nodes to know which registry credentials are available
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Read image pull secrets to scan private registry images
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "observex.fullname" . }}-trivy-scanner
+  labels: {{ include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trivy-scanner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "observex.fullname" . }}-trivy-scanner
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "observex.fullname" . }}-trivy-scanner
+    namespace: {{ .Release.Namespace }}
+
+---
+{{- if .Values.trivyScanner.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "observex.fullname" . }}-trivy-cache
+  namespace: {{ .Release.Namespace }}
+  labels: {{ include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trivy-scanner
+  annotations:
+    # Keep the PVC when Helm release is deleted — DB download is expensive
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [{{ .Values.trivyScanner.persistence.accessMode }}]
+  resources:
+    requests:
+      storage: {{ .Values.trivyScanner.persistence.size }}
+  {{- if .Values.trivyScanner.persistence.storageClass }}
+  storageClassName: {{ .Values.trivyScanner.persistence.storageClass }}
+  {{- end }}
+---
+{{- end }}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "observex.fullname" . }}-trivy-scanner
+  namespace: {{ .Release.Namespace }}
+  labels: {{ include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trivy-scanner
+spec:
+  replicas: 1
+  # Recreate avoids two instances scanning concurrently on rolling update
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "observex.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: trivy-scanner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "observex.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: trivy-scanner
+      annotations:
+        {{- if .Values.trivyScanner.podAnnotations }}
+        {{- toYaml .Values.trivyScanner.podAnnotations | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "observex.fullname" . }}-trivy-scanner
+      securityContext:
+        runAsNonRoot: false   # Trivy needs root to pull and inspect image layers
+        runAsUser: 0
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: trivy-scanner
+          image: {{ include "observex.image" (dict "image" .Values.trivyScanner.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.trivyScanner.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: INGESTOR_URL
+              value: "http://{{ include "observex.fullname" . }}-ingestor:4318"
+            - name: CLUSTER_NAME
+              value: {{ .Values.global.clusterName | default .Release.Name | quote }}
+            - name: SCAN_INTERVAL_HOURS
+              value: {{ .Values.trivyScanner.scanIntervalHours | quote }}
+            - name: TRIVY_SEVERITY
+              value: {{ .Values.trivyScanner.minSeverity | quote }}
+            - name: TRIVY_CACHE_DIR
+              value: {{ .Values.trivyScanner.cacheDir | quote }}
+            - name: TRIVY_PATH
+              value: "/usr/local/bin/trivy"
+            {{- with .Values.trivyScanner.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources: {{ toYaml .Values.trivyScanner.resources | nindent 12 }}
+          volumeMounts:
+            - name: trivy-cache
+              mountPath: {{ .Values.trivyScanner.cacheDir }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: trivy-cache
+          {{- if .Values.trivyScanner.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "observex.fullname" . }}-trivy-cache
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.trivyScanner.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.trivyScanner.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.trivyScanner.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "observex.fullname" . }}-trivy-scanner
+  namespace: {{ .Release.Namespace }}
+  labels: {{ include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trivy-scanner
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ include "observex.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: trivy-scanner
+{{- end }}

@@ -1,0 +1,1 @@
+{"v":1,"check_id":"chk-golden-2","endpoint":"observex.test","observed_at":"2026-09-23T12:00:00Z","duration_ns":3000000000,"outcome":"timeout","trust":{"chain_verified":false,"hostname_verified":false,"reason":""},"detail":"timeout during handshake"}

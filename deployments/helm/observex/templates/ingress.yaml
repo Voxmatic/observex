@@ -1,0 +1,81 @@
+{{/*
+ingress.yaml
+Kubernetes Ingress for the ObserveX API Gateway.
+
+TLS variants:
+  a) cert-manager (recommended for production):
+       ingress.tls.enabled: true
+       ingress.annotations:
+         cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+  b) Pre-existing secret:
+       ingress.tls.enabled: true
+       ingress.tls.secretName: "my-tls-secret"
+
+  c) No TLS (dev/testing):
+       ingress.tls.enabled: false
+*/}}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "observex.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-gateway
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+    {{- if .Values.ingress.tls.enabled }}
+    {{- if .Values.ingress.tls.certManager.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.tls.certManager.clusterIssuer | quote }}
+    {{- end }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.global.domain | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.global.domain | quote }}
+      http:
+        paths:
+          # API Gateway handles all /api/* traffic
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "observex.fullname" . }}-api-gateway
+                port:
+                  name: http
+          # WebSocket endpoint for live topology + event streaming
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "observex.fullname" . }}-api-gateway
+                port:
+                  name: http
+          # Health check endpoint (used by load balancer health probes)
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "observex.fullname" . }}-api-gateway
+                port:
+                  name: http
+          # Frontend (serves static React app — add when frontend is built)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "observex.fullname" . }}-api-gateway
+                port:
+                  name: http
+{{- end }}

@@ -1,0 +1,46 @@
+# Layered on f61-kind-values.yaml for the DISPOSABLE kind run only
+# (docs/validation/f61-ops-1-external-runbook.md). Keeps the minimum needed
+# for F6.1: API gateway, processor, the bundled PostgreSQL, one probe vantage
+# and the migration Job. Never use for a persistent environment. Secret
+# values (JWT secret, passwords, internal token) are passed with --set at
+# install time and are never stored here.
+processor:
+  image:
+    tag: f61-validation
+apiGateway:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  image:
+    tag: f61-validation
+f61:
+  probe:
+    image:
+      tag: f61-validation
+  migrations:
+    image:
+      tag: f61-validation
+  vantages:
+    - name: kind-a
+      credentialSecret: observex-probe-kind-a
+      # The synthetic TLS target runs inside the cluster, so its address is
+      # private: this vantage is explicitly an internal one (see test E).
+      allowPrivateTargets: true
+ingestor:
+  enabled: false
+aiAgent:
+  enabled: false
+queryEngine:
+  enabled: false
+oneagent:
+  enabled: false
+loki:
+  enabled: false
+tempo:
+  enabled: false
+neo4j:
+  enabled: false
+redis:
+  enabled: false
+clickhouse:
+  enabled: false

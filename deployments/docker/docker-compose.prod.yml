@@ -1,0 +1,54 @@
+# ObserveX Production Docker Compose
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+version: "3.9"
+
+x-prod-defaults: &prod-defaults
+  restart: always
+  logging:
+    driver: json-file
+    options: { max-size: "50m", max-file: "5" }
+
+services:
+  # Production overrides — resource limits, health checks, replicas
+
+  api-gateway:
+    <<: *prod-defaults
+    deploy:
+      replicas: 2
+      resources:
+        limits: { cpus: "1.0", memory: "512m" }
+        reservations: { cpus: "0.25", memory: "128m" }
+
+  processor:
+    <<: *prod-defaults
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: "1g" }
+        reservations: { cpus: "0.5", memory: "256m" }
+
+  ingestor:
+    <<: *prod-defaults
+    deploy:
+      replicas: 2
+      resources:
+        limits: { cpus: "2.0", memory: "1g" }
+        reservations: { cpus: "0.5", memory: "256m" }
+
+  ai-agent:
+    <<: *prod-defaults
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: "512m" }
+
+  postgres:
+    <<: *prod-defaults
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets: [pg_password]
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: "2g" }
+
+secrets:
+  pg_password:
+    external: true

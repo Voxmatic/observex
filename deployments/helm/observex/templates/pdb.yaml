@@ -1,0 +1,37 @@
+{{/*
+pdb.yaml
+PodDisruptionBudgets ensure high availability during cluster maintenance,
+node drains, and rolling upgrades. When minAvailable=1, at least one pod
+of each service stays running even while nodes are being drained.
+*/}}
+
+{{- $services := list
+  (dict "comp" "ingestor"     "vals" .Values.ingestor)
+  (dict "comp" "processor"    "vals" .Values.processor)
+  (dict "comp" "ai-agent"     "vals" .Values.aiAgent)
+  (dict "comp" "api-gateway"  "vals" .Values.apiGateway)
+  (dict "comp" "query-engine" "vals" .Values.queryEngine)
+  (dict "comp" "profiling"    "vals" .Values.profiling)
+  (dict "comp" "synthetic"    "vals" .Values.synthetic)
+  (dict "comp" "topology"     "vals" .Values.topology)
+-}}
+
+{{- range $svc := $services }}
+{{- if and $svc.vals.enabled $svc.vals.podDisruptionBudget.enabled (gt (int $svc.vals.replicaCount) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "observex.fullname" $ }}-{{ $svc.comp }}
+  namespace: {{ $.Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc.comp }}
+spec:
+  minAvailable: {{ $svc.vals.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $svc.comp }}
+{{- end }}
+{{- end }}

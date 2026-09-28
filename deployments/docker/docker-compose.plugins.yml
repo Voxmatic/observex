@@ -1,0 +1,162 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  ObserveX — Optional Plugin Services
+# ════════════════════════════════════════════════════════════════════════════
+#  None of these start automatically. ObserveX works perfectly without them.
+#  Enable only what you need:
+#
+#  Enable a single plugin:
+#    docker compose -f docker-compose.yml -f docker-compose.plugins.yml up -d grafana
+#
+#  Enable multiple plugins:
+#    docker compose -f docker-compose.yml -f docker-compose.plugins.yml \
+#      up -d grafana elasticsearch kibana
+#
+#  All plugins are pre-wired to ObserveX storage (ClickHouse, Loki, Tempo).
+#  No manual configuration needed — datasources are provisioned automatically.
+# ════════════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+x-plugin-defaults: &plugin-defaults
+  restart: unless-stopped
+  networks: [observex]
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "3" }
+
+services:
+
+  # ── PLUGIN 1: Grafana ────────────────────────────────────────────────────────
+  # Full Grafana dashboard UI pre-wired to ClickHouse + Loki + Tempo.
+  # Open: http://localhost:3002  (admin / admin)
+  # 3 dashboards auto-loaded: Platform Overview, Infrastructure, SLOs
+  grafana:
+    <<: *plugin-defaults
+    image: grafana/grafana:10.4.3
+    container_name: observex-plugin-grafana
+    ports: ["3002:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER:      admin
+      GF_SECURITY_ADMIN_PASSWORD:  admin
+      GF_USERS_DEFAULT_THEME:      dark
+      GF_AUTH_ANONYMOUS_ENABLED:   "false"
+      GF_FEATURE_TOGGLES_ENABLE:   traceToMetrics,correlations,traceToProfiles
+      GF_INSTALL_PLUGINS:          grafana-piechart-panel,grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── PLUGIN 2: Elasticsearch ──────────────────────────────────────────────────
+  # Log storage alternative to Loki. Can ingest OTLP logs from ObserveX ingestor.
+  # NOTE: Requires 4GB+ RAM. Set vm.max_map_count=262144 on host.
+  # Open: http://localhost:9200  (elastic / changeme)
+  elasticsearch:
+    <<: *plugin-defaults
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: observex-plugin-elasticsearch
+    ports: ["9200:9200"]
+    environment:
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=changeme
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-su", "elastic:changeme", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── PLUGIN 3: Kibana ─────────────────────────────────────────────────────────
+  # Dashboard UI for Elasticsearch. Connect to ObserveX Elasticsearch plugin.
+  # Open: http://localhost:5601  (elastic / changeme)
+  kibana:
+    <<: *plugin-defaults
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: observex-plugin-kibana
+    ports: ["5601:5601"]
+    environment:
+      ELASTICSEARCH_HOSTS:     '["http://elasticsearch:9200"]'
+      ELASTICSEARCH_USERNAME:  elastic
+      ELASTICSEARCH_PASSWORD:  changeme
+      XPACK_SECURITY_ENABLED:  "true"
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:5601/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── PLUGIN 4: Jaeger ─────────────────────────────────────────────────────────
+  # Trace UI alternative to ObserveX's built-in trace view.
+  # Accepts OTLP traces and provides its own UI for trace exploration.
+  # Open: http://localhost:16686
+  jaeger:
+    <<: *plugin-defaults
+    image: jaegertracing/all-in-one:1.56
+    container_name: observex-plugin-jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC (conflicts with ingestor — disable ingestor first)
+      - "14250:14250"   # gRPC
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    volumes:
+      - jaeger_data:/badger
+
+  # ── PLUGIN 5: Zipkin ─────────────────────────────────────────────────────────
+  # Lightweight distributed tracing UI. Alternative to Jaeger.
+  # Open: http://localhost:9411
+  zipkin:
+    <<: *plugin-defaults
+    image: openzipkin/zipkin:3.3
+    container_name: observex-plugin-zipkin
+    ports: ["9411:9411"]
+
+  # Open: http://localhost:9090
+  # Open: http://localhost:9093
+  # ── PLUGIN 8: OpenTelemetry Collector ────────────────────────────────────────
+  # OTEL Collector for those who need fan-out to multiple backends.
+  # Receives OTLP, forwards to ObserveX ingestor + any other backend.
+  # Open: http://localhost:55679  (zpages)
+  otel-collector:
+    <<: *plugin-defaults
+    image: otel/opentelemetry-collector-contrib:0.99.0
+    container_name: observex-plugin-otelcol
+    ports:
+      - "4319:4317"     # OTLP gRPC (4317 used by ingestor)
+      - "4320:4318"     # OTLP HTTP
+      - "55679:55679"   # zpages
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./configs/otelcol.yaml:/etc/otelcol/config.yaml:ro
+
+  # ── PLUGIN 9: Pyroscope (continuous profiling) ───────────────────────────────
+  # Pyroscope for continuous profiling. Complements ObserveX ProfilingPage.
+  # Open: http://localhost:4040
+  pyroscope:
+    <<: *plugin-defaults
+    image: grafana/pyroscope:1.5.0
+    container_name: observex-plugin-pyroscope
+    ports: ["4040:4040"]
+    volumes:
+      - pyroscope_data:/data
+
+volumes:
+  grafana_data:
+  elasticsearch_data:
+  jaeger_data:
+  pyroscope_data:
+
+networks:
+  observex:
+    external: true

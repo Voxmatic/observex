@@ -1,0 +1,146 @@
+{{/*
+rbac.yaml
+RBAC resources for ObserveX components that need K8s API access:
+  - AI Agent: needs to restart pods, scale deployments, cordon nodes, etc.
+  - OneAgent: needs read access to discover cluster topology.
+*/}}
+
+# ── AI Agent ClusterRole ──────────────────────────────────────────────────────
+{{- if and .Values.aiAgent.enabled .Values.aiAgent.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "observex.fullname" . }}-ai-agent
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent
+rules:
+  # Deployment management: rolling restart, rollback, scale
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # Pod management: restart (delete), read logs
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/exec
+    verbs: ["get", "list", "watch", "delete"]
+
+  # Node management: cordon / uncordon
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # Service + endpoints: read for topology context
+  - apiGroups: [""]
+    resources:
+      - services
+      - endpoints
+      - namespaces
+    verbs: ["get", "list", "watch"]
+
+  # Events: read for alert context
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs: ["get", "list", "watch"]
+
+  # HPA: scale up/down
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # cert-manager: rotate TLS certificates
+  - apiGroups: ["cert-manager.io"]
+    resources:
+      - certificates
+      - certificaterequests
+    verbs: ["get", "list", "watch", "delete", "create"]
+    # Only apply if cert-manager is installed
+{{- end }}
+
+{{- if and .Values.aiAgent.enabled .Values.aiAgent.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "observex.fullname" . }}-ai-agent
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "observex.fullname" . }}-ai-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "observex.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+
+# ── OneAgent ClusterRole ──────────────────────────────────────────────────────
+{{- if and .Values.oneagent.enabled .Values.oneagent.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "observex.fullname" . }}-oneagent
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: oneagent
+rules:
+  # Discover all pods, nodes, services and their metadata
+  - apiGroups: [""]
+    resources:
+      - pods
+      - nodes
+      - services
+      - endpoints
+      - namespaces
+      - replicationcontrollers
+    verbs: ["get", "list", "watch"]
+
+  # Discover deployments, daemonsets, statefulsets for service identification
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+
+  # Read node metrics for resource usage
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - nodes
+      - pods
+    verbs: ["get", "list"]
+{{- end }}
+
+{{- if and .Values.oneagent.enabled .Values.oneagent.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "observex.fullname" . }}-oneagent
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: oneagent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "observex.fullname" . }}-oneagent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "observex.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

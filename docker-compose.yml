@@ -1,0 +1,79 @@
+version: "3.9"
+services:
+  api-gateway:
+    build: .
+    ports: ["8080:3001"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: observex
+      POSTGRES_PASSWORD: observex123
+      POSTGRES_DB: observex
+      JWT_SECRET: change-this-in-production-32chars
+      PORT: "3001"
+      REDIS_ADDR: redis:6379
+      DB_MONITOR_URL: http://db-monitor:8087
+      OBSERVEX_INTERNAL_TOKEN_FILE: /run/secrets/observex_internal_token
+    secrets: [observex_internal_token]
+    depends_on:
+      postgres: { condition: service_healthy }
+      db-monitor: { condition: service_started }
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: observex
+      POSTGRES_PASSWORD: observex123
+      POSTGRES_DB: observex
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./internal/db/migrations:/docker-entrypoint-initdb.d
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "observex"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    restart: unless-stopped
+
+  db-monitor:
+    build:
+      context: .
+      dockerfile: services/db-monitor/Dockerfile
+    ports: ["8087:8087"]
+    environment:
+      ADDR: ":8087"
+      POSTGRES_DSN: postgres://observex:observex123@postgres:5432/observex?sslmode=disable
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  ai-agent:
+    build: ./ai-agent-python
+    ports: ["8082:8082"]
+    environment:
+      OBSERVEX_API_URL: http://api-gateway:8080
+      MODE: suggest
+    depends_on: [api-gateway]
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports: ["3000:3000"]
+    environment:
+      VITE_API_URL: http://localhost:8080
+    depends_on: [api-gateway]
+
+# Internal service token (S1-06), mounted at /run/secrets/observex_internal_token
+# and read through OBSERVEX_INTERNAL_TOKEN_FILE. Create the file first (from the
+# repository root):  mkdir -p secrets && openssl rand -hex 32 > secrets/internal-token
+# The file is git-ignored; never commit a real token. Minimum 32 bytes.
+secrets:
+  observex_internal_token:
+    file: ./secrets/internal-token
+
+volumes:
+  pgdata:

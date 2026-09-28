@@ -1,0 +1,5 @@
+# catalog.json is an approved, hash-pinned artifact (KB-SEED-2, SHA-256
+# 95aa0bd8aa24d000ee09c4b97cac925f2ba470cad4fead39896d5ffb6ba95767).
+# Git must never rewrite its line endings: a CRLF checkout would change the
+# embedded bytes and the knowledge package would refuse to load them.
+catalog.json -text

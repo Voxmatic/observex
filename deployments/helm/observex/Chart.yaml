@@ -1,0 +1,72 @@
+apiVersion: v2
+name: observex
+description: >
+  Full-stack observability platform — metrics, logs, traces, topology,
+  continuous profiling, synthetic monitoring, and autonomous AI remediation.
+  A self-hosted Datadog/Dynatrace alternative built on open standards.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+keywords:
+  - observability
+  - monitoring
+  - apm
+  - tracing
+  - ebpf
+  - profiling
+  - synthetic
+
+home: https://github.com/your-org/observex
+sources:
+  - https://github.com/your-org/observex
+
+maintainers:
+  - name: ObserveX Team
+    email: platform@observex.io
+
+annotations:
+  category: Monitoring
+
+# ── Sub-chart dependencies ──────────────────────────────────────────────────
+# Storage backends that are managed as Helm sub-charts.
+# Loki, Tempo, and Neo4j use their own community charts. Native metrics are
+# stored in the ClickHouse chart below.
+# PostgreSQL, Redis, and ClickHouse use Bitnami charts.
+# All can be disabled to use externally-managed instances.
+dependencies:
+  # Log storage
+  - name: loki
+    version: "6.6.2"
+    repository: https://grafana.github.io/helm-charts
+    condition: loki.enabled
+
+  # Trace storage
+  - name: tempo
+    version: "1.9.2"
+    repository: https://grafana.github.io/helm-charts
+    condition: tempo.enabled
+
+  # Graph database (topology)
+  - name: neo4j
+    version: "5.18.0"
+    repository: https://helm.neo4j.com/neo4j
+    condition: neo4j.enabled
+
+  # Relational database (user/session/dashboard persistence)
+  - name: postgresql
+    version: "15.5.4"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+
+  # Cache / rate-limiting
+  - name: redis
+    version: "19.3.4"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+
+  # Event / profiling / synthetic storage
+  - name: clickhouse
+    version: "6.3.4"
+    repository: https://charts.bitnami.com/bitnami
+    condition: clickhouse.enabled

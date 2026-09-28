@@ -1,0 +1,224 @@
+{{/*
+daemonset.yaml
+OneAgent DaemonSet — runs on every node in the cluster.
+Requires privileged security context and host namespace access for eBPF.
+*/}}
+{{- if .Values.oneagent.enabled }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "observex.fullname" . }}-oneagent
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: oneagent
+  annotations:
+    observex.io/component: oneagent
+    observex.io/requires-privileged: "true"
+spec:
+  selector:
+    matchLabels:
+      {{- include "observex.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: oneagent
+  updateStrategy:
+    type: {{ .Values.oneagent.updateStrategy.type }}
+    {{- if eq .Values.oneagent.updateStrategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.oneagent.updateStrategy.rollingUpdate.maxUnavailable }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "observex.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: oneagent
+      annotations:
+        # Force pod restart when config changes
+        checksum/config: {{ .Values.oneagent | toJson | sha256sum }}
+        {{- with .Values.oneagent.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "observex.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "observex.serviceAccountName" . }}
+
+      # Host namespace access required for eBPF and /proc reading
+      hostPID:     {{ .Values.oneagent.hostPID }}
+      hostNetwork: {{ .Values.oneagent.hostNetwork }}
+      hostIPC:     {{ .Values.oneagent.hostIPC }}
+
+      # Run before application pods to ensure network is monitored from start
+      priorityClassName: system-node-critical
+
+      tolerations:
+        {{- toYaml .Values.oneagent.tolerations | nindent 8 }}
+
+      {{- with .Values.oneagent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.oneagent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # Give the agent time to finish flushing metrics on shutdown
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: oneagent
+          image: {{ include "observex.image" (dict "Values" .Values "image" .Values.oneagent.image "Chart" .Chart) }}
+          imagePullPolicy: {{ .Values.oneagent.image.pullPolicy }}
+
+          securityContext:
+            {{- toYaml .Values.oneagent.securityContext | nindent 12 }}
+            # Explicitly list capabilities needed for eBPF
+            capabilities:
+              add:
+                - SYS_ADMIN      # BPF program loading
+                - NET_ADMIN      # Network monitoring
+                - SYS_PTRACE     # /proc reading
+                - SYS_RESOURCE   # Remove memlock limit for BPF maps
+
+          env:
+            # K8s downward API — inject node name for topology labelling
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+            # ObserveX config
+            - name: CLUSTER_NAME
+              value: {{ .Values.global.clusterName | quote }}
+            - name: INGESTOR_URL
+              value: {{ include "observex.ingestorUrl" . }}
+            {{- if .Values.oneagent.tokenSecret.name }}
+            - name: OBSERVEX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oneagent.tokenSecret.name | quote }}
+                  key: {{ .Values.oneagent.tokenSecret.key | quote }}
+            {{- end }}
+            - name: ENABLE_EBPF
+              value: {{ .Values.oneagent.enableEBPF | quote }}
+            - name: ENABLE_K8S
+              value: {{ .Values.oneagent.enableK8s | quote }}
+            - name: ENABLE_PROC
+              value: {{ .Values.oneagent.enableProc | quote }}
+            - name: SCRAPE_INTERVAL_S
+              value: {{ .Values.oneagent.scrapeIntervalSeconds | quote }}
+            - name: OBSERVEX_COLLECTION_MODE
+              value: {{ .Values.oneagent.collectionMode | quote }}
+            - name: ENABLE_NATIVE_METRICS
+              value: {{ .Values.oneagent.enableNativeMetrics | quote }}
+            - name: OBSERVEX_STATE_DIR
+              value: /var/lib/observex/oneagent
+            - name: LOG_LEVEL
+              value: {{ .Values.global.logLevel | quote }}
+
+          resources:
+            {{- toYaml .Values.oneagent.resources | nindent 12 }}
+
+          # Liveness probe: verify the process is running and can read /proc
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /proc/self/status && echo ok"
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /var/lib/observex/oneagent/runtime/state.json"
+            failureThreshold: 12
+            periodSeconds: 5
+
+          volumeMounts:
+            {{- if .Values.oneagent.mounts.proc }}
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            {{- end }}
+            {{- if .Values.oneagent.mounts.sys }}
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            {{- end }}
+            {{- if .Values.oneagent.mounts.cgroup }}
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            {{- end }}
+            {{- if .Values.oneagent.mounts.debugfs }}
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+              # NOT read-only — eBPF kprobe attachment needs write access to tracefs
+            {{- end }}
+            {{- if .Values.oneagent.mounts.modules }}
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            {{- end }}
+            {{- if .Values.oneagent.mounts.state }}
+            - name: state
+              mountPath: /var/lib/observex
+            {{- end }}
+
+      volumes:
+        {{- if .Values.oneagent.mounts.proc }}
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory
+        {{- end }}
+        {{- if .Values.oneagent.mounts.sys }}
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        {{- end }}
+        {{- if .Values.oneagent.mounts.cgroup }}
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        {{- end }}
+        {{- if .Values.oneagent.mounts.debugfs }}
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if .Values.oneagent.mounts.modules }}
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        {{- end }}
+        {{- if .Values.oneagent.mounts.state }}
+        - name: state
+          hostPath:
+            path: {{ .Values.oneagent.statePath | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+{{- end }}

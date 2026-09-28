@@ -1,0 +1,203 @@
+{{/*
+configmap.yaml
+ConfigMaps for storage backend configuration.
+These are mounted into the storage pods as config files.
+*/}}
+
+# ── ClickHouse initialisation SQL ─────────────────────────────────────────────
+# Creates all the tables ObserveX needs on first startup.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "observex.fullname" . }}-clickhouse-init
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+data:
+  init.sql: |
+    -- ObserveX ClickHouse schema
+    -- Tables for events, profiling data, and synthetic check results.
+
+    CREATE DATABASE IF NOT EXISTS observex;
+
+    -- ── Events (from ingestor) ──────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS observex.events (
+        ts          DateTime64(9),
+        org_id      String,
+        service_id  String,
+        service_name String,
+        namespace   String,
+        cluster     String,
+        kind        LowCardinality(String),
+        severity    LowCardinality(String),
+        message     String,
+        labels      Map(String, String),
+        extra       String
+    ) ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(ts)
+    ORDER BY (org_id, service_id, ts)
+    TTL ts + INTERVAL 90 DAY;
+
+    -- ── Profiling data ──────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS observex.profiles (
+        ts           DateTime64(9),
+        service_name String,
+        profile_type LowCardinality(String),
+        format       LowCardinality(String),
+        data         String,
+        duration_ns  UInt64,
+        sample_rate  UInt32,
+        labels       Map(String, String)
+    ) ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(ts)
+    ORDER BY (service_name, profile_type, ts)
+    TTL ts + INTERVAL 30 DAY;
+
+    -- ── Synthetic check results ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS observex.synthetic_results (
+        ts           DateTime64(9),
+        check_id     String,
+        check_name   String,
+        check_type   LowCardinality(String),
+        target       String,
+        status       LowCardinality(String),
+        duration_ms  Float64,
+        status_code  Int32,
+        error        String,
+        region       LowCardinality(String),
+        labels       Map(String, String)
+    ) ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(ts)
+    ORDER BY (check_id, ts)
+    TTL ts + INTERVAL 90 DAY;
+
+    -- ── Topology edges (time-series) ────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS observex.topology_edges (
+        ts           DateTime64(9),
+        source_id    String,
+        source_name  String,
+        target_id    String,
+        target_name  String,
+        namespace    String,
+        protocol     LowCardinality(String),
+        calls_total  UInt64,
+        errors_total UInt64,
+        duration_sum_ms Float64,
+        bytes_sent   UInt64,
+        bytes_recv   UInt64
+    ) ENGINE = SummingMergeTree(calls_total, errors_total, duration_sum_ms, bytes_sent, bytes_recv)
+    PARTITION BY toYYYYMM(ts)
+    ORDER BY (source_id, target_id, ts)
+    TTL ts + INTERVAL 30 DAY;
+
+# ── Loki configuration ────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "observex.fullname" . }}-loki-config
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+data:
+  config.yaml: |
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9095
+
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+
+    query_range:
+      results_cache:
+        cache:
+          embedded_cache:
+            enabled: true
+            max_size_mb: 100
+
+    limits_config:
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      retention_period: {{ .Values.loki.loki.limits_config.retention_period | default "720h" }}
+      max_query_series: 10000
+
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+
+    ruler:
+      alertmanager_url: http://localhost:9093
+
+# ── Tempo configuration ───────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "observex.fullname" . }}-tempo-config
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "observex.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tempo
+data:
+  tempo.yaml: |
+    stream_over_http_enabled: true
+
+    server:
+      http_listen_port: 3200
+      log_level: {{ .Values.global.logLevel }}
+
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            http:
+              endpoint: 0.0.0.0:4318
+            grpc:
+              endpoint: 0.0.0.0:4317
+
+    ingester:
+      max_block_duration: 5m
+
+    compactor:
+      compaction:
+        block_retention: {{ .Values.tempo.tempo.retention | default "720h" }}
+
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+
+    querier:
+      frontend_worker:
+        frontend_address: localhost:9095
+
+    query_frontend:
+      search:
+        duration_slo: 5s
+        throughput_bytes_slo: 1.073741824e+09
+
+    analytics:
+      reporting_enabled: false
