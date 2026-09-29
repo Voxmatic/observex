@@ -1136,3 +1136,20 @@ Drafted by Claude (Cowork) as decision advisor; approved by owner akash.
 | **Date recorded** | 28 Sep 2026 |
 
 Drafted by Claude (Cowork) as decision advisor; approved by owner akash.
+
+---
+
+## OD-24 — Build-only compile check authorized — approved 2026-09-29
+
+| Field | Record |
+|---|---|
+| **Answer (as given)** | "I want to build the code now, without running tests. This is a compile check for development and demos only. It is NOT validation evidence: it does not count toward the A1 review (C13); it does not count toward OPS-1; it does not count toward any 'production-ready' claim (C11). C13 stays in force and not satisfied. Tasks 3–6 from my earlier instruction (A1 evidence, S1-01, D4 fix, OPS-1) are PAUSED until I say to resume. Do not change any code." |
+| **Status** | **Approved** |
+| **Date recorded** | 29 Sep 2026 |
+| **Scope** | (1) Build in Claude's workspace from the project folder as it is (baseline tag `baseline-2026-09-28`): `go build ./...`, then one binary per main package under `services/` into a folder outside the project; the web app (`npm install`, `npm run build`) in a copy of `frontend/`, never in the project. (2) A PowerShell script for the owner's PC, `Claude outputs\build-tools\build-only.ps1`, that builds the same way and stops if the project folder changes. (3) Build failures are reported, not fixed. |
+| **Not validation evidence** | Does not count toward the A1 review (C13), OPS-1, or any production-ready claim (C11). **C13 remains in force and is not satisfied.** |
+| **Paused** | Tasks 3–6 of the owner's instruction of 2026-09-28: the A1 evidence pack, S1-01, the D4 processor fix, OPS-1. Paused until the owner says to resume. **No code change.** |
+| **Still not authorized** | Any code change; tests of any kind (`go test`, `go vet`, `-race`, gosec, govulncheck); anything against a persistent database; Docker, Helm or cluster work; changes to the Makefile, `ci.yml`, `cd.yml` or migrations; pushing; printing any secret value. |
+| **Numbering note** | This log contains no entries OD-20 … OD-23. The ID OD-24 was assigned by the owner. |
+
+Drafted by Claude (Cowork) as decision advisor; approved by owner akash.
